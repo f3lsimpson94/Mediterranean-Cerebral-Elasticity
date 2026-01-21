@@ -1,0 +1,193 @@
+---
+title: "06_secondary-mediate"
+author: "Felicity"
+date: "2025-12-11"
+output: html_document
+---
+
+############################################################
+## Secondary analyses: Mediation (lavaan) with FIML + CIs
+## Design choices (HK6):
+## - We fit with bootstrap SEs for ALL parameters (se="bootstrap"),
+##   which is simple and defensible. Inference for mediation
+##   focuses on NONPARAMETRIC BOOTSTRAP percentile CIs for ab.
+## - Direct/covariate paths show bootstrap SEs too; conclusions
+##   are typically convergent with ML/robust SEs.
+############################################################
+
+```{r}
+# 0) Start clean --------------------------------------------------------------
+rm(list = ls())
+
+# 1) Packages ----------------------------------------------------------------
+library(tidyverse)  # wrangling/printing
+library(lavaan)     # SEM / mediation
+library(semTools)   # utilities (standardized outputs, etc.)
+
+# Optional: reproducible bootstrap resamples (not critical)
+# set.seed(20250903)
+```
+
+
+```{r}
+# 2) Load & prepare data -----------------------------------------------------
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv") %>%
+  dplyr::filter(record_id >= 2001) %>%
+  dplyr::mutate(sex = ifelse(sex == "Male", 1, 0)) %>%  # 0 = female, 1 = male
+  dplyr::select(-record_id)
+
+cat("Rows after filtering:", nrow(dat), "\n")
+
+# Safety: ensure all required columns exist (fails fast if not)
+required_cols <- c(
+  "MedDiet.Panagiotakis","age","sex","anu2_total_yrs_edu","totalmvpa","kJwithDF",
+  "prefx_pfc_avg","Verbal_three","CognitiveCost_three","ProcSpeed_three"
+)
+```
+
+
+```{r}
+stopifnot(all(required_cols %in% names(dat)))
+
+# 3) Z-scale continuous variables (stability, comparability) -----------------
+cont_vars <- c("MedDiet.Panagiotakis","age","anu2_total_yrs_edu",
+               "totalmvpa","kJwithDF","prefx_pfc_avg")
+dat_z <- dat %>% mutate(across(all_of(cont_vars), ~ as.numeric(scale(.))))
+
+# Optional diagnostic: variances ≈ 1 under FIML with fixed.x = FALSE
+diag_fit <- sem('prefx_pfc_avg ~ MedDiet.Panagiotakis',
+                data = dat_z, missing = "FIML", fixed.x = FALSE)
+# varTable(diag_fit)  # uncomment to inspect
+```
+
+
+```{r}
+# 4) Mediation models (3 outcomes) -------------------------------------------
+# Structure per model:
+#   mediator: prefx_pfc_avg ~ a*MedDiet + covariates
+#   outcome : OUTCOME ~ c_prime*MedDiet + b*prefx + covariates
+#   effects : ab := a*b; total := c_prime + ab
+# Covariates: age, sex (0/1), anu2_total_yrs_edu, totalmvpa, kJwithDF
+
+model_verbal <- '
+  prefx_pfc_avg ~ a*MedDiet.Panagiotakis + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  Verbal_three  ~ c_prime*MedDiet.Panagiotakis + b*prefx_pfc_avg + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  ab    := a * b
+  total := c_prime + ab
+'
+
+model_cogcost <- '
+  prefx_pfc_avg         ~ a*MedDiet.Panagiotakis + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  CognitiveCost_three   ~ c_prime*MedDiet.Panagiotakis + b*prefx_pfc_avg + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  ab    := a * b
+  total := c_prime + ab
+'
+
+model_proc <- '
+  prefx_pfc_avg     ~ a*MedDiet.Panagiotakis + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  ProcSpeed_three   ~ c_prime*MedDiet.Panagiotakis + b*prefx_pfc_avg + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF
+  ab    := a * b
+  total := c_prime + ab
+'
+```
+
+
+```{r}
+# 5) Fit each model with FIML + bootstrap SEs --------------------------------
+# Notes:
+# - missing = "FIML" with fixed.x = FALSE => FIML handles missingness on ALL vars
+# - se="bootstrap", bootstrap=1000 => nonparametric bootstrap for SEs/CIs
+fit_verbal  <- sem(model_verbal,  data = dat_z, missing = "FIML",
+                   fixed.x = FALSE, se = "bootstrap", bootstrap = 1000)
+fit_cogcost <- sem(model_cogcost, data = dat_z, missing = "FIML",
+                   fixed.x = FALSE, se = "bootstrap", bootstrap = 1000)
+fit_proc    <- sem(model_proc,    data = dat_z, missing = "FIML",
+                   fixed.x = FALSE, se = "bootstrap", bootstrap = 1000)
+
+# 6) Inspect summaries (standardised) ----------------------------------------
+# (Bootstrap-based SEs/p; standardized = TRUE; R^2 printed for transparency)
+summary(fit_verbal,  standardized = TRUE, rsquare = TRUE)
+summary(fit_cogcost, standardized = TRUE, rsquare = TRUE)
+summary(fit_proc,    standardized = TRUE, rsquare = TRUE)
+```
+
+
+```{r}
+# 7) Build APA-style mediation table (β_std, 95% perc CI, p) -----------------
+# Helper: extract one parameter (by label OR lhs~rhs), standardized, percentile CI
+extract_param <- function(fit, label = NULL, lhs = NULL, rhs = NULL) {
+  pe <- parameterEstimates(fit, standardized = TRUE,
+                           boot.ci.type = "perc", level = 0.95) %>% as_tibble()
+  if (!is.null(label)) {
+    pe <- dplyr::filter(pe, label == !!label)
+  } else {
+    pe <- dplyr::filter(pe, lhs == !!lhs, op == "~", rhs == !!rhs)
+  }
+  tibble::tibble(
+    beta = round(pe$std.all, 3),
+    CI   = sprintf("[%.3f, %.3f]", pe$ci.lower, pe$ci.upper),
+    p    = pe$pvalue
+  )
+}
+
+# Build one 3-row block (Direct, Indirect, Total) for each outcome
+build_block <- function(fit, outcome_label, out_var) {
+  direct   <- extract_param(fit, lhs = out_var, rhs = "MedDiet.Panagiotakis")
+  indirect <- extract_param(fit, label = "ab")
+  total    <- extract_param(fit, label = "total")
+  tibble::tibble(
+    Outcome       = outcome_label,
+    `Effect Type` = c("Direct (c′)", "Indirect (ab)", "Total"),
+    β             = c(direct$beta,   indirect$beta,   total$beta),
+    `95% CI`      = c(direct$CI,     indirect$CI,     total$CI),
+    p             = c(direct$p,      indirect$p,      total$p)
+  )
+}
+
+tbl_verbal <- build_block(fit_verbal,  "Verbal Memory",      "Verbal_three")
+tbl_exec   <- build_block(fit_cogcost, "Executive Function", "CognitiveCost_three")
+tbl_speed  <- build_block(fit_proc,    "Processing Speed",   "ProcSpeed_three")
+
+med_table <- dplyr::bind_rows(tbl_verbal, tbl_exec, tbl_speed)
+
+# Pretty p-values: three decimals, "<.001" if needed
+fmt_p <- function(x) ifelse(is.na(x), NA, ifelse(x < .001, "<.001", sprintf("%.3f", x)))
+med_table <- med_table %>% mutate(p = fmt_p(as.numeric(p)))
+
+# Print a clean table (knitr in Rmd, or just print here)
+knitr::kable(
+  med_table,
+  caption = "Mediation of MedDiet → PReFx → Cognition (standardised β, bootstrap 95% CI)"
+)
+```
+
+
+```{r}
+# 8) Quick sanity checks (no analysis changes) -------------------------------
+# Prints standardized a, b, c′, and ab CI so you can confirm directions/coverage.
+qc_block <- function(fit, outcome_label){
+  pe <- parameterEstimates(fit, standardized = TRUE,
+                           boot.ci.type = "perc", level = 0.95) %>% as_tibble()
+  pick <- function(lbl) dplyr::filter(pe, label == lbl)
+  tibble::tibble(
+    Outcome      = outcome_label,
+    a_beta       = round(pick("a")$std.all, 3),       a_p = fmt_p(pick("a")$pvalue),
+    b_beta       = round(pick("b")$std.all, 3),       b_p = fmt_p(pick("b")$pvalue),
+    cprime_beta  = round(pick("c_prime")$std.all, 3), cprime_p = fmt_p(pick("c_prime")$pvalue),
+    ab_beta      = round(pick("ab")$std.all, 3),
+    ab_CI        = sprintf("[%.3f, %.3f]", pick("ab")$ci.lower, pick("ab")$ci.upper)
+  )
+}
+qc_tbl <- dplyr::bind_rows(
+  qc_block(fit_verbal,  "Verbal Memory"),
+  qc_block(fit_cogcost, "Executive Function"),
+  qc_block(fit_proc,    "Processing Speed")
+)
+print(qc_tbl)
+
+# 9) (Optional) Save table(s) for supplement --------------------------------
+# write.csv(med_table, "Table_6_mediation_standardized.csv", row.names = FALSE)
+
+```
+
+

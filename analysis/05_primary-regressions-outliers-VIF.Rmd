@@ -1,0 +1,404 @@
+---
+title: "05_primary_regressions"
+author: "Felicity"
+date: "2025-12-11"
+output: html_document
+---
+
+############################################################
+## 03 – Primary analysis: MedDiet → PReFx (Models 1–3)
+##    + Diagnostics + Sensitivity + VIF
+############################################################
+
+
+```{r}
+# ---- 0) Clean environment & load packages ----
+
+rm(list = ls())
+
+library(tidyverse)
+library(car)
+library(QuantPsyc)
+
+# ---- 1) Load analysis data ----
+
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv")
+
+
+```
+
+
+
+```{r}
+# ---- 2) Filter cohort & variables ----
+
+dat <- dat %>%
+filter(record_id >= 2001) %>%
+dplyr::select(
+record_id, age, sex, anu2_total_yrs_edu, totalmvpa, kJwithDF,
+MedDiet.Panagiotakis, prefx_pfc_avg
+) %>%
+mutate(sex = ifelse(sex == "Male", 1, 0)) %>%  # 0=Female, 1=Male
+drop_na()
+
+cat("Sample size after listwise deletion:", nrow(dat), "\n")
+
+```
+
+
+```{r}
+# ---- 3) Function to compute standardised CIs ----
+
+calculate_standardized_ci <- function(model) {
+beta <- lm.beta(model)
+coefs <- summary(model)$coefficients[-1, , drop = FALSE]
+se <- coefs[, "Std. Error"]
+t_value <- qt(0.975, df = df.residual(model))
+
+se_beta <- abs(beta) * (se / abs(coefs[, "Estimate"]))
+lower <- beta - t_value * se_beta
+upper <- beta + t_value * se_beta
+
+tibble(
+Variable = rownames(coefs),
+Estimate = beta,
+Lower = lower,
+Upper = upper
+)
+}
+
+```
+
+
+```{r}
+# ---- 4) Fit Models 1–3 ----
+
+model1 <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis, data = dat)
+
+model2 <- lm(
+prefx_pfc_avg ~ MedDiet.Panagiotakis + age + sex + anu2_total_yrs_edu,
+data = dat
+)
+
+model3 <- lm(
+prefx_pfc_avg ~ MedDiet.Panagiotakis + age + sex + anu2_total_yrs_edu +
+totalmvpa + kJwithDF,
+data = dat
+)
+
+```
+
+
+
+```{r}
+# ---- 5) Print summaries + Standardised Betas ----
+
+cat("Model 1 Summary:\n")
+print(summary(model1))
+print(calculate_standardized_ci(model1))
+
+cat("\nModel 2 Summary:\n")
+print(summary(model2))
+print(calculate_standardized_ci(model2))
+
+cat("\nModel 3 Summary:\n")
+print(summary(model3))
+print(calculate_standardized_ci(model3))
+
+```
+
+```{r}
+# ---- 6) Adjusted effect plot (Model 3) ----
+
+library(visreg)
+
+visreg(
+model3, "MedDiet.Panagiotakis",
+xlab = "Mediterranean Diet Score",
+ylab = "Pulse Relaxation Function (Adjusted)",
+main = "Association between MedDiet and PReFx (Model 3)"
+)
+
+```
+
+```{r}
+# ---- 7) Diagnostics for Model 3 ----
+
+par(mfrow = c(2, 2))
+plot(model3)
+par(mfrow = c(1, 1))
+
+```
+
+
+```{r}
+# ---- 8) Influence-case counts ----
+
+n <- nobs(model3)
+cook <- cooks.distance(model3)
+lev  <- hatvalues(model3)
+dfb  <- dfbetas(model3)
+
+thr_cook <- 4/n
+thr_lev  <- 2 * mean(lev)
+thr_dfb  <- 2/sqrt(n)
+
+flag_cook    <- cook > thr_cook
+flag_lev     <- lev  > thr_lev
+flag_dfb_any <- apply(abs(dfb), 1, max) > thr_dfb
+flag_dfb_med <- abs(dfb[, "MedDiet.Panagiotakis"]) > thr_dfb
+flag_any     <- flag_cook | flag_lev | flag_dfb_any
+
+cat("Cook > 4/n:", sum(flag_cook), "\n")
+cat("Leverage > 2*mean:", sum(flag_lev), "\n")
+cat("DFBETA (ANY):", sum(flag_dfb_any), "\n")
+cat("DFBETA (MedDiet):", sum(flag_dfb_med), "\n")
+cat("Union of all flags:", sum(flag_any), "\n")
+
+```
+
+```{r}
+# ---- 9) Sensitivity re-fits (Table S6) ----
+
+term <- "MedDiet.Panagiotakis"
+fmla <- formula(model3)
+
+fits <- list(
+Full       = model3,
+CookOnly   = lm(fmla, data = dat[!flag_cook, ]),
+LevOnly    = lm(fmla, data = dat[!flag_lev, ]),
+DFBETA_Med = lm(fmla, data = dat[!flag_dfb_med, ]),
+Sans_All   = lm(fmla, data = dat[!flag_any, ])
+)
+
+std_ci <- function(fit, term) {
+s    <- summary(fit)
+b    <- coef(fit)[term]
+se_b <- s$coefficients[term, "Std. Error"]
+std  <- QuantPsyc::lm.beta(fit)[term]
+
+scale <- if (is.na(b) || b == 0) NA_real_ else std / b
+se_std <- if (is.na(scale)) NA_real_ else abs(se_b * scale)
+tcrit <- qt(0.975, df = df.residual(fit))
+
+c(
+n   = nobs(fit),
+std = std,
+lo  = std - tcrit * se_std,
+hi  = std + tcrit * se_std,
+p   = s$coefficients[term, "Pr(>|t|)"]
+)
+}
+
+mods <- c("Full","CookOnly","LevOnly","DFBETA_Med","Sans_All")
+raw  <- t(sapply(fits[mods], std_ci, term = term))
+raw  <- as.data.frame(raw)
+raw$Model <- rownames(raw); rownames(raw) <- NULL
+
+fmt2 <- function(x) sprintf("%.2f", x)
+fmtp <- function(x) ifelse(x < .001, "<.001", sprintf("%.3f", x))
+
+tbl_S6 <- data.frame(
+Model = raw$Model,
+n     = as.integer(raw$n),
+`Std β` = fmt2(raw$std),
+`95% CI` = paste0("[", fmt2(raw$lo), ", ", fmt2(raw$hi), "]"),
+p = fmtp(raw$p),
+check.names = FALSE
+)
+
+tbl_S6
+
+```
+
+```{r}
+# ---- 10) VIF diagnostics ----
+
+vif_tidy <- function(fit, thresh = 5) {
+term_labels <- attr(terms(fit), "term.labels")
+if (length(term_labels) == 1) {
+return(tibble(Term = term_labels, Df = 1, GVIF = 1, VIF_equiv = 1, Tolerance = 1, Flag = FALSE))
+}
+
+v <- car::vif(fit)
+if (is.matrix(v)) {
+res <- tibble(
+Term = rownames(v),
+Df   = v[, "Df"],
+GVIF = v[, "GVIF"],
+VIF_equiv = v[, "GVIF"]^(1/(2*v[, "Df"]))
+)
+} else {
+res <- tibble(
+Term = names(v),
+Df = 1,
+GVIF = v,
+VIF_equiv = v
+)
+}
+
+res %>%
+mutate(
+Tolerance = 1/VIF_equiv,
+Flag = VIF_equiv > thresh
+) %>%
+arrange(desc(VIF_equiv))
+}
+
+cat("\n--- VIF Model 1 ---\n"); print(vif_tidy(model1))
+cat("\n--- VIF Model 2 ---\n"); print(vif_tidy(model2))
+cat("\n--- VIF Model 3 ---\n"); print(vif_tidy(model3))
+
+```
+
+
+
+
+#--------------------Supplementary
+
+
+```{r}
+# Clear environment
+rm(list = ls())
+
+# Load necessary libraries
+library(tidyverse)
+library(car)
+library(QuantPsyc)  # For standardized beta coefficients
+library(visreg)     # For visualization in the non-linear model section
+library(ggplot2)
+library(tidyr)
+
+# Load the data
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv")
+
+# Filter data: keep participants from Newcastle and remove missing cases across all variables used in any model
+dat <- dat %>%
+  filter(record_id >= 2001) %>%
+  dplyr::select(record_id, age, sex, anu2_total_yrs_edu, totalmvpa, kJwithDF, 
+                MedDiet.Panagiotakis, prefx_pfc_avg) %>%
+  # Create both numeric and factor versions of sex
+  mutate(sex_numeric = ifelse(sex == "Male", 1, 0),
+         sex_factor = factor(sex)) %>%
+  drop_na(MedDiet.Panagiotakis, prefx_pfc_avg, age, sex, anu2_total_yrs_edu, totalmvpa, kJwithDF)
+
+cat("Sample size after listwise deletion:", nrow(dat), "\n")
+
+# Updated function to compute standardized coefficients that recodes any 2-level factors to numeric
+calculate_standardized_ci <- function(model) {
+  # Get the model frame and convert any 2-level factor to numeric dummy (0/1)
+  mod_frame <- model.frame(model)
+  for (col in names(mod_frame)) {
+    if (is.factor(mod_frame[[col]])) {
+      if (nlevels(mod_frame[[col]]) == 2) {
+        # Convert: second level becomes 1, first level becomes 0
+        mod_frame[[col]] <- ifelse(mod_frame[[col]] == levels(mod_frame[[col]])[2], 1, 0)
+      } else {
+        stop("Factor variable with more than 2 levels not supported in standardization.")
+      }
+    }
+  }
+  # Re-fit the model using the modified data
+  model_converted <- lm(formula(model), data = mod_frame)
+  
+  # Get standardized coefficients from the converted model
+  beta <- lm.beta(model_converted)
+  
+  # Use the coefficients and standard errors from the original model summary (excluding the intercept)
+  coefs <- summary(model)$coefficients[-1, , drop = FALSE]
+  se <- coefs[, "Std. Error"]
+  
+  t_value <- qt(0.975, df = df.residual(model))
+  se_beta <- abs(beta) * (se / abs(coefs[, "Estimate"]))
+  
+  lower <- beta - t_value * se_beta
+  upper <- beta + t_value * se_beta
+  
+  tibble(Variable = rownames(coefs), Estimate = beta, Lower = lower, Upper = upper)
+}
+
+### Baseline Models (as before)
+model1 <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis, data = dat)
+model2 <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis + age + sex_numeric + anu2_total_yrs_edu, data = dat)
+model3 <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis + age + sex_numeric + anu2_total_yrs_edu + totalmvpa + kJwithDF, data = dat)
+
+cat("Model 1 Summary:\n")
+print(summary(model1))
+cat("\nStandardized Coefficients for Model 1 with CIs:\n")
+print(calculate_standardized_ci(model1))
+
+cat("\nModel 2 Summary:\n")
+print(summary(model2))
+cat("\nStandardized Coefficients for Model 2 with CIs:\n")
+print(calculate_standardized_ci(model2))
+
+cat("\nModel 3 Summary:\n")
+print(summary(model3))
+cat("\nStandardized Coefficients for Model 3 with CIs:\n")
+print(calculate_standardized_ci(model3))
+
+### Interaction Models
+
+# 1. Interaction between MedDiet and age
+model_int_age <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis * age + sex_numeric + anu2_total_yrs_edu + totalmvpa + kJwithDF, data = dat)
+cat("\nModel with MedDiet*age Interaction Summary:\n")
+print(summary(model_int_age))
+cat("\nStandardized Coefficients for Model with MedDiet*age Interaction with CIs:\n")
+print(calculate_standardized_ci(model_int_age))
+
+# 2. Interaction between MedDiet and sex (using sex as a factor)
+model_int_sex <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis * sex_factor + age + anu2_total_yrs_edu + totalmvpa + kJwithDF, data = dat)
+cat("\nModel with MedDiet*sex Interaction Summary:\n")
+print(summary(model_int_sex))
+cat("\nStandardized Coefficients for Model with MedDiet*sex Interaction with CIs:\n")
+print(calculate_standardized_ci(model_int_sex))
+
+# 3. Model with both interactions
+model_int_both <- lm(prefx_pfc_avg ~ MedDiet.Panagiotakis * age + MedDiet.Panagiotakis * sex_factor + anu2_total_yrs_edu + totalmvpa + kJwithDF, data = dat)
+cat("\nModel with Both Interactions (MedDiet*age and MedDiet*sex) Summary:\n")
+print(summary(model_int_both))
+cat("\nStandardized Coefficients for Model with Both Interactions with CIs:\n")
+print(calculate_standardized_ci(model_int_both))
+
+### Non-linear Modeling and Visualization
+
+# Non-linear Model using a 2nd-degree polynomial for MedDiet
+model3_nl <- lm(prefx_pfc_avg ~ poly(MedDiet.Panagiotakis, 2) + age + sex + anu2_total_yrs_edu + totalmvpa + kJwithDF, data = dat)
+visreg(model3_nl, "MedDiet.Panagiotakis",
+       xlab = "Mediterranean Diet Score",
+       ylab = "Pulse Relaxation Function (Adjusted)",
+       main = "Association between MedDiet and Prefx Score (Model 3: Adjusted, Non-linear)")
+
+# Compute predicted values and residuals from the linear model (model3)
+dat$predicted <- predict(model3)
+dat$resid <- residuals(model3)
+# Calculate the adjusted response (partial effect): fitted values + residuals
+dat$adjusted <- dat$predicted + dat$resid
+
+# Plot adjusted association with a loess smoother
+ggplot(dat, aes(x = MedDiet.Panagiotakis, y = adjusted)) +
+  geom_point() +
+  geom_smooth(method = "loess", span = 1.0, se = TRUE, color = "blue", linewidth = 0.5) +
+  labs(x = "Mediterranean Diet Score",
+       y = "Adjusted Pulse Relaxation Function",
+       title = "Association between MedDiet and PReFx (Adjusted)") +
+  theme_minimal()
+
+# Reshape the data to long format for faceted histograms
+dat_long <- dat %>%
+  pivot_longer(cols = c(age, sex_numeric, anu2_total_yrs_edu, totalmvpa, kJwithDF, 
+                        MedDiet.Panagiotakis, prefx_pfc_avg),
+               names_to = "variable", values_to = "value")
+
+# Create faceted histograms for each variable
+ggplot(dat_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(title = "Histograms of All Considered Variables",
+       x = "Value",
+       y = "Frequency") +
+  theme_minimal()
+
+
+```
+

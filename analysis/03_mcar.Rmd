@@ -1,0 +1,102 @@
+
+---
+title: "Cognitive Variable Missing Data Summary"
+author: "Felicity Simpson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(naniar)
+library(MissMech)
+library(ggplot2)
+```
+
+## 1. Load and Prepare Data
+
+```{r load-data}
+# Load data
+path <- "C:/Users/c3371138/Dropbox/optical-imaging/dat/AF_optical_2.csv"
+dat <- read.csv(path)
+
+# Filter Newcastle participants only and select CFA-relevant variables
+semvars <- dat %>%
+  filter(record_id >= 2001) %>%
+  select(record_id,          
+         # Verbal Memory
+         VRMDRTC, VRMFRDS, VRMIRTC, 
+         # Processing Speed
+         SimpleChoiceLatency, ComplexChoiceLatency,
+         # Cognitive Cost (executive function in manuscript)
+         IES_MTTICMD, IES_MTTMTCMD, 
+         IES_congruencyCost, IES_mixCost
+         #crystallised intelligence
+        # educationtotal, NIH_Reading, NIH_PictureVocab
+  )
+
+# Remove record_id before summarising missing data
+semvars_clean <- semvars %>% select(-record_id)
+
+# Confirm total N
+total_n <- nrow(semvars_clean)
+total_n  # Should be 198
+```
+
+```{r}
+# These checks do not modify data
+stopifnot(nrow(semvars_clean) == total_n)
+
+all_numeric <- vapply(semvars_clean, is.numeric, logical(1))
+if (!all(all_numeric)) {
+  message("Non-numeric columns detected: ",
+          paste(names(semvars_clean)[!all_numeric], collapse = ", "))
+}
+
+colSums_is_na <- colSums(is.na(semvars_clean))
+data.frame(variable = names(colSums_is_na),
+           n_missing = as.integer(colSums_is_na))
+
+```
+
+
+
+## 2. Missing Data Summary Table
+
+```{r missing-summary}
+# Get missing data summary
+missing_summary <- miss_var_summary(semvars_clean) %>%
+  mutate(
+    Valid_n = total_n - n_miss,
+    Missing_Percent = round(pct_miss, 2)
+  ) %>%
+  select(Variable = variable, Missing_n = n_miss, Missing_Percent, Valid_n)
+
+# Show table
+missing_summary
+```
+
+## 3. Visualise Missing Data
+
+```{r vis-missing}
+vis_miss(semvars_clean) +
+  theme_minimal() +
+  labs(title = "Missingness Pattern in Cognitive Variables")
+```
+
+## 4. Little's MCAR Test
+
+```{r mcar-test}
+mcar_test <- TestMCARNormality(semvars_clean)
+mcar_test  # Look at both parametric and non-parametric p-values
+```
+
+## 5. Save Output to CSV (Optional)
+
+```{r save}
+#write.csv(missing_summary, "MissingData_CFA_Summary.csv", row.names = FALSE)

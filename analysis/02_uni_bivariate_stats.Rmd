@@ -1,0 +1,850 @@
+---
+title: "02_uni_bivariate_stats"
+author: "Felicity"
+date: "2025-12-10"
+output: html_document
+---
+
+```{r}
+
+# ---- 01 Setup ----
+library(dplyr)
+library(tidyr)
+library(readr)
+
+# Load dataset
+dataset <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv")
+
+# Ensure sex is a factor
+dataset <- dataset %>%
+  mutate(sex = factor(sex, levels = c("Female", "Male")))
+
+# Filter to Newcastle cohort
+newcastle_data <- dataset %>% 
+  filter(record_id >= 2001)
+
+# Variables to summarise (ordered for manuscript Table 2)
+continuous_vars <- c(
+  "age",
+  "anu2_total_yrs_edu",
+  "kJwithDF",
+  "totalmvpa",
+  "bmi",
+  "waist",
+  "waist_hip_ratio",
+  "hr_average",
+  "dbp",
+  "sbp",
+  "LDL",
+  "hdl",
+  "chol_mmoll",
+  "trigs",
+  "glucose",
+  "MedDiet.Panagiotakis",
+  "prefx_pfc_avg"
+)
+
+```
+
+
+```{r}
+# ---- 02 Range (Min/Max) ----
+range_vals <- newcastle_data %>%
+  summarise(across(all_of(continuous_vars),
+                   list(Min = ~min(.x, na.rm = TRUE),
+                        Max = ~max(.x, na.rm = TRUE)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Variable", "Statistic"),
+               values_to = "Value",
+               names_pattern = "(.*)_(Min|Max)") %>%
+  pivot_wider(names_from = Statistic, values_from = Value)
+
+```
+
+```{r}
+# ---- 03 Overall Means & SDs ----
+overall_vals <- newcastle_data %>%
+  summarise(across(all_of(continuous_vars),
+                   list(Mean = ~mean(.x, na.rm = TRUE),
+                        SD   = ~sd(.x, na.rm = TRUE)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Variable", "Statistic"),
+               values_to = "All_Value",
+               names_pattern = "(.*)_(Mean|SD)") %>%
+  pivot_wider(names_from = Statistic, values_from = All_Value,
+              names_prefix = "All_")
+
+```
+
+
+```{r}
+
+# ---- 04 Sex-specific Means: Male ----
+male_vals <- newcastle_data %>%
+  filter(sex == "Male") %>%
+  summarise(across(all_of(continuous_vars),
+                   list(Mean = ~mean(.x, na.rm = TRUE),
+                        SD   = ~sd(.x, na.rm = TRUE)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Variable", "Statistic"),
+               values_to = "Male_Value",
+               names_pattern = "(.*)_(Mean|SD)") %>%
+  pivot_wider(names_from = Statistic, values_from = Male_Value,
+              names_prefix = "Male_")
+
+
+# ---- 05 Sex-specific Means: Female ----
+female_vals <- newcastle_data %>%
+  filter(sex == "Female") %>%
+  summarise(across(all_of(continuous_vars),
+                   list(Mean = ~mean(.x, na.rm = TRUE),
+                        SD   = ~sd(.x, na.rm = TRUE)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Variable", "Statistic"),
+               values_to = "Female_Value",
+               names_pattern = "(.*)_(Mean|SD)") %>%
+  pivot_wider(names_from = Statistic, values_from = Female_Value,
+              names_prefix = "Female_")
+
+
+
+```
+
+
+```{r}
+# ---- 06 T-test p-values ----
+p_vals_df <- tibble(
+  Variable = continuous_vars,
+  p_value = sapply(continuous_vars,
+                   function(v) t.test(newcastle_data[[v]] ~ newcastle_data$sex)$p.value)
+)
+
+```
+
+
+```{r}
+# ---- 07 Merge all summaries ----
+final_summary <- range_vals %>%
+  left_join(overall_vals, by = "Variable") %>%
+  left_join(male_vals,   by = "Variable") %>%
+  left_join(female_vals, by = "Variable") %>%
+  left_join(p_vals_df,   by = "Variable")
+
+```
+
+```{r}
+# ---- 08 Formatting ----
+final_summary_formatted <- final_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 2))) %>% 
+  mutate(p_value = ifelse(p_value < 0.001, "<0.001",
+                          sprintf("%.3f", p_value)))
+
+final_summary_formatted
+
+```
+
+```{r}
+# ---- 09 Create Publication-Ready Table ----
+
+pub_table <- final_summary %>%
+  mutate(
+    Overall = sprintf("%.2f (%.2f)", All_Mean, All_SD),
+    Female  = sprintf("%.2f (%.2f)", Female_Mean, Female_SD),
+    Male    = sprintf("%.2f (%.2f)", Male_Mean, Male_SD),
+    Min     = round(Min, 2),
+    Max     = round(Max, 2),
+    p       = ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value))
+  ) %>%
+  select(
+    Variable,
+    Min,
+    Max,
+    Overall,
+    Female,
+    Male,
+    p
+  )
+
+pub_table
+
+
+```
+
+```{r}
+write.csv(pub_table, "FS2025_Table2_Descriptives.csv", row.names = FALSE)
+
+```
+
+
+
+
+#------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+```{r}
+## ---- 10 Variable Distributions (Hist + Density + QQ) ----
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)   # optional, used to combine plots nicely
+
+# List of variables in manuscript order
+continuous_vars <- c(
+  "age",
+  "anu2_total_yrs_edu",
+  "kJwithDF",
+  "totalmvpa",
+  "bmi",
+  "waist",
+  "waist_hip_ratio",
+  "hr_average",
+  "dbp",
+  "sbp",
+  "LDL",
+  "hdl",
+  "chol_mmoll",
+  "trigs",
+  "glucose",
+  "MedDiet.Panagiotakis",
+  "prefx_pfc_avg"
+)
+
+# Create an output directory for plots (optional but tidy)
+if (!dir.exists("figures/distributions")) dir.create("figures/distributions", recursive = TRUE)
+
+# Loop through each variable and generate:
+# Histogram + Density + QQ plot
+for (v in continuous_vars) {
+
+  data_vec <- newcastle_data[[v]]
+
+  # Histogram + density
+  p1 <- ggplot(newcastle_data, aes(x = .data[[v]])) +
+    geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "#9ecae1", color = "white") +
+    geom_density(color = "#08519c", linewidth = 1) +
+    labs(
+      title = paste("Distribution of", v),
+      x = v,
+      y = "Density"
+    ) +
+    theme_minimal(base_size = 12)
+
+  # QQ plot
+  p2 <- ggplot(newcastle_data, aes(sample = .data[[v]])) +
+    stat_qq() +
+    stat_qq_line(color = "red") +
+    labs(
+      title = paste("Q-Q Plot:", v),
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal(base_size = 12)
+
+  # Combine plots vertically
+  combined_plot <- p1 / p2
+
+  # Print to Rmd output
+  print(combined_plot)
+
+  # Save each combined plot
+  ggsave(
+    filename = paste0("figures/distributions/", v, "_distribution.png"),
+    plot = combined_plot,
+    width = 7,
+    height = 9,
+    dpi = 300
+  )
+}
+
+```
+
+#------------------------------------------------------------
+
+##-- Bivariate stats 
+
+```{r}
+# Clear environment
+rm(list = ls())
+```
+
+
+```{r}
+# ---- 0) Setup ----
+library(dplyr)
+library(tidyr)
+library(readr)
+library(Hmisc)
+
+# ---- 1) Load data ----
+dataset <- read_csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv") %>%
+  filter(record_id >= 2001)
+
+# ---- 2) Variables in your exact required order ----
+corr_vars <- c(
+  "MedDiet.Panagiotakis",
+  "prefx_pfc_avg",
+  "age",
+  "anu2_total_yrs_edu",
+  "kJwithDF",
+  "bmi",
+  "waist",
+  "waist_hip_ratio",
+  "dbp",
+  "sbp",
+  "hr_average",
+  "chol_mmoll",
+  "hdl",
+  "LDL",
+  "trigs",
+  "glucose",
+  "totalmvpa"
+)
+
+dat_corr <- dataset %>% select(all_of(corr_vars))
+
+# ---- 3) Compute correlations ----
+rc  <- rcorr(as.matrix(dat_corr), type="pearson")
+r_m <- rc$r
+p_m <- rc$P
+
+# ---- 4) Convert to tidy form (preserve ordering exactly) ----
+corr_tidy <- 
+  as.data.frame(r_m) %>%
+  tibble::rownames_to_column("Variable") %>%
+  pivot_longer(-Variable, names_to="Var2", values_to="r") %>%
+  left_join(
+    as.data.frame(p_m) %>%
+      tibble::rownames_to_column("Variable") %>%
+      pivot_longer(-Variable, names_to="Var2", values_to="p"),
+    by = c("Variable","Var2")
+  ) %>%
+  mutate(
+    Variable = factor(Variable, levels = corr_vars),
+    Var2     = factor(Var2,     levels = corr_vars)
+  )
+
+# ---- 5) Keep only bottom triangle (Var2 < Variable) ----
+corr_bt <- corr_tidy %>%
+  filter(as.integer(Var2) < as.integer(Variable))
+
+# ---- 6) Format r and p ----
+corr_bt <- corr_bt %>%
+  mutate(
+    r = sprintf("%.2f", r),
+    p = ifelse(p < 0.001, "<.001", sprintf("%.3f", p))
+  )
+
+# ---- 7) Pivot to wide with r then p ----
+corr_wide <- corr_bt %>%
+  pivot_longer(cols = c(r, p),
+               names_to = "Statistic",
+               values_to = "Value") %>%
+  mutate(
+    Statistic = factor(Statistic, levels = c("r", "p")),
+    Variable  = factor(Variable, levels = corr_vars),
+    Var2      = factor(Var2,     levels = corr_vars)
+  ) %>%
+  arrange(Variable, Statistic) %>%
+  pivot_wider(id_cols = c(Variable, Statistic),
+              names_from = Var2,
+              values_from = Value)
+
+# ---- 8) View final table ----
+corr_wide
+
+
+```
+
+```{r}
+# ---- 9) Save ----
+write.csv(corr_wide, "correlationtriangle.csv", row.names = FALSE)
+```
+
+
+#------------------- Demographics
+
+```{r}
+# ---- Extra summary: sex distribution only ----
+
+# Filter to Newcastle cohort
+filtered_data <- dataset %>% filter(record_id >= 2001)
+
+# Ensure sex is a consistent character/factor variable
+filtered_data$sex <- as.character(filtered_data$sex)
+
+# Total N
+N <- nrow(filtered_data)
+
+# Percent female & male
+percent_female <- (sum(filtered_data$sex %in% c("Female", "2"), na.rm = TRUE) / N) * 100
+percent_male   <- (sum(filtered_data$sex %in% c("Male", "1"), na.rm = TRUE) / N) * 100
+
+cat("Female participants:", round(percent_female, 2), "%\n")
+cat("Male participants:", round(percent_male, 2), "%\n")
+cat("Total N:", N, "\n")
+
+```
+
+```{r PReFx_age_scatter, message=FALSE, warning=FALSE}
+
+# ---- Load libraries ----
+library(ggplot2)
+library(dplyr)
+
+# ---- Load & filter Newcastle sample ----
+dataset <- read.csv(
+  "C:/Users/c3371138/Dropbox/optical-imaging/dat/AF_optical_2.csv"
+) %>% 
+  filter(record_id >= 2001)
+
+# ---- Compute sex-specific correlations ----
+cor_female <- cor.test(dataset$age[dataset$sex == "Female"],
+                       dataset$prefx_pfc_avg[dataset$sex == "Female"])
+
+cor_male <- cor.test(dataset$age[dataset$sex == "Male"],
+                     dataset$prefx_pfc_avg[dataset$sex == "Male"])
+
+# Extract numbers & remove leading zeros
+r_f <- sub("^(-?)0\\.", "\\1.", sprintf("%.2f", cor_female$estimate))
+p_f <- ifelse(cor_female$p.value < 0.001,
+              "<.001",
+              sub("^(-?)0\\.", "\\1.", sprintf("%.3f", cor_female$p.value)))
+
+r_m <- sub("^(-?)0\\.", "\\1.", sprintf("%.2f", cor_male$estimate))
+p_m <- ifelse(cor_male$p.value < 0.001,
+              "<.001",
+              sub("^(-?)0\\.", "\\1.", sprintf("%.3f", cor_male$p.value)))
+
+# Build annotation labels
+label_f <- bquote(italic(r)[Female] == .(r_f) ~ "," ~ italic(p) == .(p_f))
+label_m <- bquote(italic(r)[Male]   == .(r_m) ~ "," ~ italic(p) == .(p_m))
+
+# ---- Final Plot ----
+ggplot(dataset, aes(x = age, y = prefx_pfc_avg, color = factor(sex))) +
+  geom_point(alpha = 0.7, size = 1) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.3, linewidth = 0.7) +
+  scale_color_manual(values = c("red", "blue"),
+                     labels = c("Female", "Male"),
+                     name   = "Sex") +
+  scale_y_continuous(
+    limits = c(0.10, 0.30),
+    breaks = seq(0.10, 0.30, by = 0.05),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Age (years)",
+    y = "PReFx",
+    color = "Sex"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", size = 0.3),
+    panel.grid.minor = element_blank(),
+    axis.line        = element_line(color = "black", size = 0.3),
+    axis.ticks       = element_line(color = "black"),
+    legend.position  = "right",
+    legend.title     = element_text(size = 8),
+    legend.text      = element_text(size = 8),
+    axis.title       = element_text(size = 10),
+    axis.text        = element_text(size = 10)
+  ) +
+  annotate("text", x = 61, y = 0.12, label = label_f,
+           color = "black", size = 3.3, hjust = 0) +
+  annotate("text", x = 69, y = 0.11, label = label_m,
+           color = "black", size = 3.3, hjust = 1)
+
+
+```
+
+
+
+#-----------------------------------------------------------------------------
+##Supplementary Material
+
+
+```{r}
+
+##  MedDiet quartiles (ANOVA descriptives)
+
+
+# ---- S1 Setup: MedDiet quartile ANOVA table ----
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+
+# Load data (same file you used previously for MedDiet quartiles)
+med_dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/dat/AF_optical_2.csv")
+
+# Restrict to Newcastle participants
+med_dat <- med_dat %>%
+  dplyr::filter(record_id >= 2001)
+
+# ---- S2 Create MedDiet quartiles ----
+# Quartiles based on MedDiet.Panagiotakis
+med_dat <- med_dat %>%
+  dplyr::mutate(
+    MedDiet_Quartiles = cut(
+      MedDiet.Panagiotakis,
+      breaks = stats::quantile(MedDiet.Panagiotakis,
+                               probs = seq(0, 1, 0.25),
+                               na.rm = TRUE),
+      include.lowest = TRUE,
+      labels = c("Q1", "Q2", "Q3", "Q4")
+    )
+  )
+
+# (Optional) Inspect the actual score ranges per quartile
+quartile_ranges <- med_dat %>%
+  dplyr::group_by(MedDiet_Quartiles) %>%
+  dplyr::summarise(
+    Min = min(MedDiet.Panagiotakis, na.rm = TRUE),
+    Max = max(MedDiet.Panagiotakis, na.rm = TRUE),
+    .groups = "drop"
+  )
+quartile_ranges  # check these line up with (16–32), (32–34), (34–37), (37–47)
+
+
+# ---- S3 Variables and pretty labels (matching your manuscript table) ----
+quartile_vars <- c(
+  "age",
+  "bmi",
+  "educationtotal",
+  "hr_average",
+  "kJwithDF",
+  "totalmvpa",
+  "waist_hip_ratio",
+  "dbp",
+  "sbp",
+  "LDL",
+  "hdl",
+  "chol_mmoll",
+  "trigs",
+  "glucose"
+)
+
+var_labels <- c(
+  age             = "Age (years)",
+  bmi             = "BMI (kg/m\u00B2)",
+  educationtotal  = "Education (total years)",
+  hr_average      = "Resting heart rate (bpm)",
+  kJwithDF        = "Energy intake (kilojoules)",
+  totalmvpa       = "MVPA (minutes)",
+  waist_hip_ratio = "Waist-to-hip ratio",
+  dbp             = "Diastolic blood pressure (mmHg)",
+  sbp             = "Systolic blood pressure (mmHg)",
+  LDL             = "LDL cholesterol (mmol/L)",
+  hdl             = "HDL cholesterol (mmol/L)",
+  chol_mmoll      = "Total cholesterol (mmol/L)",
+  trigs           = "Triglycerides (mmol/L)",
+  glucose         = "Glucose (mmol/L)"
+)
+
+
+# ---- S4 Helper to build one row per variable ----
+build_quartile_row <- function(v) {
+
+  # Keep only rows with non-missing MedDiet quartile and variable
+  tmp <- med_dat %>%
+    dplyr::filter(!is.na(MedDiet_Quartiles),
+                  !is.na(.data[[v]]))
+
+  # Mean (SD) per quartile
+  q_stats <- tmp %>%
+    dplyr::group_by(MedDiet_Quartiles) %>%
+    dplyr::summarise(
+      Mean = mean(.data[[v]], na.rm = TRUE),
+      SD   = sd(.data[[v]], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      Mean_SD = sprintf("%.2f (%.2f)", Mean, SD)
+    ) %>%
+    dplyr::select(MedDiet_Quartiles, Mean_SD) %>%
+    tidyr::pivot_wider(
+      names_from  = MedDiet_Quartiles,
+      values_from = Mean_SD
+    ) %>%
+    # Ensure the columns are ordered Q1–Q4
+    dplyr::select(Q1, Q2, Q3, Q4)
+
+  # One-way ANOVA across quartiles for this variable
+  aov_fit <- aov(tmp[[v]] ~ tmp$MedDiet_Quartiles)
+  p_raw   <- summary(aov_fit)[[1]][["Pr(>F)"]][1]
+  p_fmt   <- ifelse(p_raw < 0.001, "<.001", sprintf("%.3f", p_raw))
+
+  # Build final row
+  tibble::tibble(
+    Variable = var_labels[[v]],
+    Q1 = q_stats$Q1,
+    Q2 = q_stats$Q2,
+    Q3 = q_stats$Q3,
+    Q4 = q_stats$Q4,
+    p  = p_fmt
+  )
+}
+
+
+# ---- S5 Build full table (one row per variable) ----
+meddiet_quartile_table <- purrr::map_dfr(quartile_vars, build_quartile_row)
+
+meddiet_quartile_table
+
+
+# ---- S6 Save for manuscript (Table S4) ----
+write.csv(
+  meddiet_quartile_table,
+  "FS2025_TableS4_MedDiet_quartiles_ANOVA.csv",
+  row.names = FALSE
+)
+
+
+
+
+```
+
+
+
+
+#-----------------------------------------------------------------------------
+##Supplementary Material
+
+#Table S6
+
+```{r}
+# Clear environment
+rm(list = ls())
+
+# Read the dataset
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv")
+
+# Load necessary libraries
+library(dplyr)
+# Load required packages
+library(tidyverse)
+library(Hmisc)
+
+# Filter for Newcastle participants only
+dat <- dat %>%
+  filter(record_id >= 2001)
+
+
+# Select the relevant variables from your dataframe (replace `dat` with your actual dataframe name)
+dat_corr <- dplyr::select(
+  dat,
+  VRMDRTC.y, VRMFRDS.y, VRMIRTC.y,
+  SimpleChoiceLatency.y, ComplexChoiceLatency.y,
+  IES_MTTICMD.y, IES_MTTMTCMD.y,
+  IES_congruencyCost.y, IES_mixCost.y,
+  prefx_pfc_avg, prefx_left_pfc, prefx_mid_pfc, prefx_right_pfc
+)
+
+
+# Compute correlation matrix
+cor_results <- rcorr(as.matrix(dat_corr), type = "pearson")
+
+# Extract correlations and p-values
+r_vals <- cor_results$r
+p_vals <- cor_results$P
+
+# Corrected list of indicator variable names
+indicators <- c(
+  "VRMDRTC.y", "VRMFRDS.y", "VRMIRTC.y",
+  "SimpleChoiceLatency.y", "ComplexChoiceLatency.y",
+  "IES_MTTICMD.y", "IES_MTTMTCMD.y", "IES_congruencyCost.y", "IES_mixCost.y"
+)
+
+
+# List of PReFx variables
+prefx_vars <- c("prefx_pfc_avg", "prefx_left_pfc", "prefx_mid_pfc", "prefx_right_pfc")
+
+# Create tidy correlation results table
+table_s6 <- map_dfr(indicators, function(ind) {
+  map_dfr(prefx_vars, function(prefx) {
+    tibble(
+      Indicator = ind,
+      PreFx_Region = prefx,
+      r = round(r_vals[ind, prefx], 2),
+      p = round(p_vals[ind, prefx], 3)
+    )
+  })
+})
+
+
+# Optional: reshape to wide format like your manuscript table
+table_s6_wide <- table_s6 %>%
+  pivot_wider(
+    names_from = PreFx_Region,
+    values_from = c(r, p),
+    names_glue = "{PreFx_Region}_{.value}"
+  )
+
+# View the result
+print(table_s6_wide)
+
+
+
+#---
+
+table_s6_wide <- table_s6_wide %>%
+  mutate(Domain = case_when(
+    str_detect(Indicator, "VRM") ~ "Verbal Memory",
+    str_detect(Indicator, "Latency") ~ "Processing Speed",
+    TRUE ~ "Executive Function"
+  ))
+
+table_s6_wide <- table_s6_wide %>%
+  arrange(factor(Domain, levels = c("Verbal Memory", "Processing Speed", "Executive Function")))
+
+# View the result
+print(table_s6_wide)
+
+
+#-------------------
+
+latent_corr <- dat %>%
+  dplyr::select(
+    Verbal_three, ProcSpeed_three, CognitiveCost_three,
+    prefx_pfc_avg, prefx_left_pfc, prefx_mid_pfc, prefx_right_pfc
+  )
+
+
+# Compute correlations
+cor_latent <- rcorr(as.matrix(latent_corr), type = "pearson")
+
+# Extract values
+r_vals_latent <- cor_latent$r
+p_vals_latent <- cor_latent$P
+
+# Format into a clean table
+latent_domains <- c("Verbal_three", "ProcSpeed_three", "CognitiveCost_three")
+prefx_regions <- c("prefx_pfc_avg", "prefx_left_pfc", "prefx_mid_pfc", "prefx_right_pfc")
+
+table_s6_domains <- map_dfr(latent_domains, function(domain) {
+  map_dfr(prefx_regions, function(prefx) {
+    tibble(
+      Cognitive_Domain = domain,
+      PreFx_Region = prefx,
+      r = round(r_vals_latent[domain, prefx], 2),
+      p = round(p_vals_latent[domain, prefx], 3)
+    )
+  })
+})
+
+# Optionally widen it like before
+table_s6_domains_wide <- table_s6_domains %>%
+  pivot_wider(
+    names_from = PreFx_Region,
+    values_from = c(r, p),
+    names_glue = "{PreFx_Region}_{.value}"
+  )
+
+print(table_s6_domains_wide)
+
+
+
+#----------------------------------------------------
+
+# Load required packages
+library(dplyr)
+library(flextable)
+library(officer)
+
+table_s6_domains_wide <- table_s6_domains_wide %>%
+  rename(Indicator = Cognitive_Domain) %>%
+  mutate(Domain = case_when(
+    str_detect(Indicator, "Verbal") ~ "Verbal Memory",
+    str_detect(Indicator, "Proc") ~ "Processing Speed",
+    TRUE ~ "Executive Function"
+  ))
+
+table_combined <- bind_rows(table_s6_wide, table_s6_domains_wide)
+
+table_combined <- table_combined %>%
+  arrange(factor(Domain, levels = c("Verbal Memory", "Processing Speed", "Executive Function")))
+
+library(flextable)
+
+# Format: r above, p below, inline in cell
+apa_cells <- function(r, p) {
+  r_fmt <- ifelse(is.na(r), "", sprintf("%.2f", r))
+  p_fmt <- ifelse(is.na(p), "", ifelse(p < 0.001, "< .001", paste0("p = ", formatC(p, digits = 3, format = "f"))))
+  paste0(r_fmt, "\n", p_fmt)
+}
+
+table_apa <- table_combined %>%
+  mutate(across(contains("_r"), ~ .x)) %>%
+  mutate(across(contains("_p"), ~ .x)) %>%
+  rowwise() %>%
+  mutate(
+    Avg = apa_cells(prefx_pfc_avg_r, prefx_pfc_avg_p),
+    Left = apa_cells(prefx_left_pfc_r, prefx_left_pfc_p),
+    Mid = apa_cells(prefx_mid_pfc_r, prefx_mid_pfc_p),
+    Right = apa_cells(prefx_right_pfc_r, prefx_right_pfc_p)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(Domain, Indicator, Avg, Left, Mid, Right)
+
+
+# Create flextable
+ft <- flextable(table_apa) %>%
+  set_header_labels(
+    Domain = "Cognitive Domain",
+    Indicator = "Indicator Variable",
+    Avg = "PReFx (Avg)",
+    Left = "Left",
+    Mid = "Mid",
+    Right = "Right"
+  ) %>%
+  align(align = "center", part = "all") %>%
+  autofit()
+
+# Export to Word
+library(officer)
+doc <- read_docx() %>%
+  body_add_par("Table S6. Correlations Between Cognitive Indicators and PReFx Measures", style = "heading 2") %>%
+  body_add_flextable(ft)
+
+print(doc, target = "Table_S6_PReFx_Correlations.docx")
+
+
+#----------
+
+
+# After computing cor_latent as before:
+cor_latent <- rcorr(as.matrix(latent_corr), type = "pearson")
+
+# n matrix: sample size for each correlation
+n_vals <- cor_latent$n
+
+# Example: see n for a particular pair
+n_vals["Verbal_three", "prefx_pfc_avg"]
+
+# To extract n for all domain-PReFx pairs, you can do:
+latent_domains <- c("Verbal_three", "ProcSpeed_three", "CognitiveCost_three")
+prefx_regions <- c("prefx_pfc_avg", "prefx_left_pfc", "prefx_mid_pfc", "prefx_right_pfc")
+
+# Tidy version: build a table
+library(tibble)
+library(purrr)
+
+table_n <- map_dfr(latent_domains, function(domain) {
+  map_dfr(prefx_regions, function(prefx) {
+    tibble(
+      Cognitive_Domain = domain,
+      PreFx_Region = prefx,
+      n = n_vals[domain, prefx]
+    )
+  })
+})
+
+print(table_n)
+
+```
+
+

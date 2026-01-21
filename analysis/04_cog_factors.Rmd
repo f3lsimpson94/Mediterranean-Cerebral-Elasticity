@@ -1,0 +1,353 @@
+---
+title: "CFA-3-factors"
+author: "Felicity"
+date: "2024-11-25"
+output: html_document
+---
+
+  
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(lavaan)
+library(psych)
+library(datawizard)
+library(performance)
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/dat/AF_optical_2.csv")
+```
+
+#The following variables will be considered for analysis:  VRMDRTC, VRMFRDS, VRMIRTC, SimpleChoiceLatency, ComplexChoiceLatency, IES_MTTICMD, IES_MTTMTCMD, IES_congruencyCost, IES_mixCost 
+
+```{r}
+semvars <- dat %>% filter(record_id >= 2001) %>% 
+  select(record_id,
+         # Verbal Memory
+         VRMDRTC, VRMFRDS, VRMIRTC, 
+         # Processing Speed
+         SimpleChoiceLatency, ComplexChoiceLatency,
+         # Cognitive Cost (executive function in manuscript)
+         IES_MTTICMD, IES_MTTMTCMD, 
+         IES_congruencyCost, IES_mixCost
+         #crystallised intelligence
+        # educationtotal, NIH_Reading, NIH_PictureVocab
+  )
+
+summary(semvars)
+```
+
+# Three-factor CFA based on theoretical model from Kałamała et al. (2025)
+# https://www.biorxiv.org/content/10.1101/2025.04.06.646611v1
+# Factors: Verbal Memory, Executive Function, Processing Speed
+# Equality constraint on Processing Speed loadings per Crawford & Lamarre (2021)
+
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# 1. Reshape data from wide to long
+semvars_long <- semvars %>%
+  select(-record_id) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  )
+
+# 2. Calculate mean and standard error for each variable
+stats_before <- semvars_long %>%
+  group_by(variable) %>%
+  summarize(
+    mean = mean(value, na.rm = TRUE),
+    se   = sd(value, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+# 3. Plot each variable in its own facet with free x-scales
+ggplot(stats_before, aes(y = 0, x = mean)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = mean - se, xmax = mean + se), height = 0.2) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 3) +
+  labs(
+    title = "Mean ± SE (Before Scaling)",
+    x = "Mean Value",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y  = element_blank(),   # Hide the y-axis labels (since y=0 is just a placeholder)
+    axis.ticks.y = element_blank()
+  )
+
+```
+```{r}
+# Histogram for each variable with free scales for clarity
+ggplot(semvars_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "grey", color = "black") +
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(
+    title = "Histograms (Before Scaling)",
+    x = "Value",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+```{r}
+# Scale each variable individually, preserving NAs
+scaled_data <- semvars %>%
+  mutate(across(where(is.numeric) & !all_of("record_id"), scale))
+```
+
+# Winsorize data
+Winsorize at ±3.29 SD (p < .001 in normal distribution)
+Conservative threshold to remove only extreme outliers 
+
+```{r}
+# Winsorize non-missing values only (preserving NAs)
+winsorized <- scaled_data %>%
+  select(-record_id) %>%
+  winsorize(method = "zscore", robust = TRUE, threshold = 3.29)
+
+# Reattach record_id
+winsorized <- cbind(record_id = scaled_data$record_id, winsorized)
+```
+
+Check for univariate outliers. 
+
+```{r}
+# Check univariate outliers (this step does not change the data)
+uni_outliers <- check_outliers(winsorized %>% select(-record_id), method = "zscore_robust")
+print(uni_outliers)  # Expect: OK or very few
+```
+No extreme univariate outliers remain. 
+
+#Multivariate outliers check
+
+```{r}
+# Detect multivariate outliers on complete rows only
+complete_cases <- winsorized %>% drop_na()
+mult_outliers <- check_outliers(complete_cases %>% select(-record_id), method = "mcd")
+outlier_rows <- attributes(mult_outliers)$outlier_count$all$Row
+outlier_ids <- complete_cases$record_id[outlier_rows]
+```
+
+```{r}
+mult_outliers
+```
+Let's remove the multivariate outliers. 
+
+```{r}
+# Remove multivariate outliers by record_id
+cleaned_data <- winsorized %>% filter(!record_id %in% outlier_ids)
+
+# Reverse-score RT and cost variables to align directionality
+cleaned_data <- cleaned_data %>%
+  mutate(across(c(SimpleChoiceLatency, ComplexChoiceLatency,
+                  IES_MTTICMD, IES_MTTMTCMD,
+                  IES_congruencyCost, IES_mixCost),
+                ~ . * -1))
+```
+
+
+
+```{r}
+# Remove record_id and pivot longer for visualization
+cleaned_data_long <- cleaned_data %>% 
+  select(-record_id) %>% 
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value")
+
+# Calculate summary statistics per variable (ignoring NAs)
+stats_after <- cleaned_data_long %>% 
+  group_by(variable) %>% 
+  summarize(
+    mean = mean(value, na.rm = TRUE),
+    se = sd(value, na.rm = TRUE)/sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+# Error bar plot (mean ± SE) after scaling and reverse scoring
+ggplot(stats_after, aes(x = variable, y = mean)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.2) +
+  labs(title = "Mean plus/minus SE (After Scaling and Reverse Scoring)",
+       x = "Cognitive Variable",
+       y = "Scaled Mean Value") +
+  theme_minimal(base_size = 14) +
+  coord_flip()
+
+
+
+```
+```{r}
+# Histogram for each variable after scaling and reverse scoring
+ggplot(cleaned_data_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "grey", color = "black") +
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Histograms (After Scaling and Reverse Scoring)",
+       x = "Scaled Value",
+       y = "Frequency") +
+  theme_minimal(base_size = 14)
+
+
+```
+
+```{r}
+# Assuming you have 'scaled_data' and 'winsorized' data frames as in your script
+
+# Remove record_id for comparison
+scaled_matrix <- as.matrix(scaled_data[ , !names(scaled_data) %in% "record_id"])
+winsorized_matrix <- as.matrix(winsorized[ , !names(winsorized) %in% "record_id"])
+
+# Count number of values that were winsorised
+num_winsorised <- sum(scaled_matrix != winsorized_matrix, na.rm = TRUE)
+
+# Count total number of data points
+total_values <- sum(!is.na(scaled_matrix))
+
+# Percentage of values winsorised
+perc_winsorised <- num_winsorised / total_values * 100
+
+cat("Number of winsorised values:", num_winsorised, "\n")
+cat("Total data points:", total_values, "\n")
+cat("Percentage winsorised:", round(perc_winsorised, 2), "%\n")
+
+```
+
+
+### Full model
+
+```{r}
+cfa3 <- '
+Verbal_three =~ VRMDRTC + VRMFRDS + VRMIRTC
+CognitiveCost_three =~ IES_MTTICMD + IES_MTTMTCMD + IES_mixCost + IES_congruencyCost
+ProcSpeed_three =~ b1*SimpleChoiceLatency + b1*ComplexChoiceLatency
+
+# Correlations
+Verbal_three ~~ CognitiveCost_three
+Verbal_three ~~ ProcSpeed_three
+CognitiveCost_three ~~ ProcSpeed_three
+
+IES_MTTICMD ~~ IES_MTTMTCMD 
+IES_mixCost ~~ IES_congruencyCost
+
+'
+```
+
+# Note: Little's MCAR test conducted in separate script showed p = .380
+# Supporting use of FIML for missing data handling
+
+
+```{r}
+cfa3fit <- cfa(cfa3, data = cleaned_data, std.lv = TRUE, missing = 'fiml')
+summary(cfa3fit)
+
+```
+Participants missing every variable are dropped
+cfa3 results for the three-factor model after removing the residual covariance between IES_mixCost and IES_congruencyCost. 
+Model fit remained excellent (χ²(24) = 25.38, p = .385), and all loadings on the Cognitive Cost factor became statistically significant. This supports a more parsimonious model without compromising interpretability or fit.
+
+```{r}
+# List of fit indices
+indices <- c("chisq", "df", "pvalue", "rmsea", "srmr", "cfi", "pnfi")
+
+# Get the requested fit measures
+fitMeasures(cfa3fit, indices)
+```
+Model fit is good and seems better than a four-factor model with general intelligence
+For reference these were my OLD fit indices
+#  chisq     df pvalue  rmsea   srmr    cfi   pnfi 
+## 67.192 47.000  0.028  0.051  0.047  0.966  0.639
+
+
+```{r}
+cfa3fit_sem <- sem(cfa3, data = as.data.frame(cleaned_data), 
+                   std.lv = TRUE, missing = 'fiml', fixed.x = FALSE)
+summary(cfa3fit_sem, fit.measures = TRUE, standardized = TRUE, ci = TRUE)
+
+```
+
+```{r}
+
+# Retrieve modification indices without specifying a threshold
+mod_indices <- modificationIndices(cfa3fit_sem)
+
+# View modification indices with a cut-off value for the modification index (e.g., > 3.84)
+mod_indices_high <- mod_indices[mod_indices$mi > 3.84, ]
+
+# Print the filtered modification indices
+print(mod_indices_high)
+
+
+
+```
+
+
+
+```{r}
+# Extract factor scores for latent variables
+factor_scores <- lavPredict(cfa3fit, type = "lv")
+
+# Bind the factor scores with the original data to create a new dataframe
+new_dataframe <- cbind(cleaned_data, factor_scores)
+
+# View the structure of the new dataframe to confirm the addition
+str(new_dataframe)
+
+# Merge the new data with the original dataset
+final_dataset <- left_join(dat, new_dataframe, by = "record_id")
+
+# Save the updated dataset to a new CSV to avoid overwriting the original accidentally
+write.csv(final_dataset, "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv", row.names = FALSE)
+
+# Print confirmation message
+print("The updated dataset with new latent variables has been successfully saved.")
+
+```
+
+#------------------------------------------------------------------------------
+
+
+```{r}
+## 1. Indicator variables: before vs after outlier removal
+
+# 1a. Define the set of raw CFA indicators
+cfa_vars <- dat %>%
+  filter(record_id >= 2001) %>%
+  select(
+    VRMDRTC, VRMFRDS, VRMIRTC,
+    SimpleChoiceLatency, ComplexChoiceLatency,
+    IES_MTTICMD, IES_MTTMTCMD,
+    IES_congruencyCost, IES_mixCost
+  )
+
+# 1b. Compute counts
+n_before <- nrow(cfa_vars)
+n_missing_indicators <- sum(!complete.cases(cfa_vars))
+n_after_outlier_removal <- nrow(cleaned_data)
+
+cat("Indicator sample size before outlier removal: ", n_before, "\n")
+cat("  – Missing on ≥1 indicator: ", n_missing_indicators, "\n")
+cat("Indicator sample size after outlier removal: ", n_after_outlier_removal, "\n\n")
+
+
+## 2. New latent variables: how many non‐missing scores per factor
+
+# new_dataframe must already contain record_id + factor_scores
+library(dplyr)
+
+latent_counts <- new_dataframe %>%
+  summarize(
+    N_Verbal   = sum(!is.na(Verbal_three)),
+    N_CogCost  = sum(!is.na(CognitiveCost_three)),
+    N_Speed    = sum(!is.na(ProcSpeed_three))
+  )
+
+print(latent_counts)
+
+```
+
