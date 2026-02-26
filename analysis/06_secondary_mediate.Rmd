@@ -1,7 +1,7 @@
 ---
 title: "06_secondary-mediate"
 author: "Felicity"
-date: "2025-12-11"
+date: "2025-02-26"
 output: html_document
 ---
 
@@ -25,7 +25,7 @@ library(lavaan)     # SEM / mediation
 library(semTools)   # utilities (standardized outputs, etc.)
 
 # Optional: reproducible bootstrap resamples (not critical)
-# set.seed(20250903)
+set.seed(20250903)
 ```
 
 
@@ -113,7 +113,7 @@ summary(fit_proc,    standardized = TRUE, rsquare = TRUE)
 
 
 ```{r}
-# 7) Build APA-style mediation table (β_std, 95% perc CI, p) -----------------
+# 7) Build mediation table (a, b, c′, ab, total; β_std, 95% perc CI, p) ------
 # Helper: extract one parameter (by label OR lhs~rhs), standardized, percentile CI
 extract_param <- function(fit, label = NULL, lhs = NULL, rhs = NULL) {
   pe <- parameterEstimates(fit, standardized = TRUE,
@@ -130,17 +130,26 @@ extract_param <- function(fit, label = NULL, lhs = NULL, rhs = NULL) {
   )
 }
 
-# Build one 3-row block (Direct, Indirect, Total) for each outcome
+# Build one 5-row block (a, b, Direct, Indirect, Total) for each outcome
 build_block <- function(fit, outcome_label, out_var) {
+  a_path   <- extract_param(fit, label = "a")
+  b_path   <- extract_param(fit, label = "b")
   direct   <- extract_param(fit, lhs = out_var, rhs = "MedDiet.Panagiotakis")
   indirect <- extract_param(fit, label = "ab")
   total    <- extract_param(fit, label = "total")
+
   tibble::tibble(
-    Outcome       = outcome_label,
-    `Effect Type` = c("Direct (c′)", "Indirect (ab)", "Total"),
-    β             = c(direct$beta,   indirect$beta,   total$beta),
-    `95% CI`      = c(direct$CI,     indirect$CI,     total$CI),
-    p             = c(direct$p,      indirect$p,      total$p)
+    Outcome       = c(outcome_label, "", "", "", ""),
+    `Effect Type` = c(
+    "a path (MedDiet → PReFx)",
+    "b path (PReFx → outcome)",
+    "c′ path (direct)",
+    "a*b path (indirect)",
+    "Total"
+          ),
+    β             = c(a_path$beta, b_path$beta, direct$beta, indirect$beta, total$beta),
+    `95% CI`      = c(a_path$CI,   b_path$CI,   direct$CI,   indirect$CI,   total$CI),
+    p             = c(a_path$p,    b_path$p,    direct$p,    indirect$p,    total$p)
   )
 }
 
@@ -157,7 +166,7 @@ med_table <- med_table %>% mutate(p = fmt_p(as.numeric(p)))
 # Print a clean table (knitr in Rmd, or just print here)
 knitr::kable(
   med_table,
-  caption = "Mediation of MedDiet → PReFx → Cognition (standardised β, bootstrap 95% CI)"
+  caption = "Mediation analysis of PReFx as a mediator of the association between MedDiet adherence and cognitive outcomes (standardised β, bootstrap 95% CI)"
 )
 ```
 
