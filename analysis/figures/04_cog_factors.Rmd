@@ -195,9 +195,9 @@ ggplot(cleaned_data_long, aes(x = value)) +
 
 
 ```
-
+#Winsorisation summary
 ```{r}
-# Assuming you have 'scaled_data' and 'winsorized' data frames as in your script
+
 
 # Remove record_id for comparison
 scaled_matrix <- as.matrix(scaled_data[ , !names(scaled_data) %in% "record_id"])
@@ -218,7 +218,7 @@ cat("Percentage winsorised:", round(perc_winsorised, 2), "%\n")
 
 ```
 
-
+### Retained FIML CFA model used for manuscript and factor extraction
 ### Full model
 
 ```{r}
@@ -249,7 +249,7 @@ summary(cfa3fit)
 ```
 Participants missing every variable are dropped
 cfa3 results for the three-factor model after removing the residual covariance between IES_mixCost and IES_congruencyCost. 
-Model fit remained excellent (χ²(24) = 25.38, p = .385), and all loadings on the Cognitive Cost factor became statistically significant. This supports a more parsimonious model without compromising interpretability or fit.
+
 
 ```{r}
 # List of fit indices
@@ -264,27 +264,33 @@ For reference these were my OLD fit indices
 ## 67.192 47.000  0.028  0.051  0.047  0.966  0.639
 
 
-```{r}
-cfa3fit_sem <- sem(cfa3, data = as.data.frame(cleaned_data), 
-                   std.lv = TRUE, missing = 'fiml', fixed.x = FALSE)
-summary(cfa3fit_sem, fit.measures = TRUE, standardized = TRUE, ci = TRUE)
 
-```
+
+
 
 ```{r}
-
 # Retrieve modification indices without specifying a threshold
-mod_indices <- modificationIndices(cfa3fit_sem)
+mod_indices <- modificationIndices(cfa3fit)
 
 # View modification indices with a cut-off value for the modification index (e.g., > 3.84)
 mod_indices_high <- mod_indices[mod_indices$mi > 3.84, ]
 
 # Print the filtered modification indices
+```
+
+
+```{r}
 print(mod_indices_high)
 
 
 
 ```
+
+
+
+
+
+
 
 
 
@@ -302,52 +308,140 @@ str(new_dataframe)
 final_dataset <- left_join(dat, new_dataframe, by = "record_id")
 
 # Save the updated dataset to a new CSV to avoid overwriting the original accidentally
-write.csv(final_dataset, "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv", row.names = FALSE)
+#write.csv(final_dataset, "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv", row.names = FALSE)
 
 # Print confirmation message
 print("The updated dataset with new latent variables has been successfully saved.")
 
 ```
+```{r}
+
+### Alternative possible solution?
+
+# - uses the winsorized data before multivariate outlier removal, 
+# keeps the usual direction alignment so that higher scores reflect better performance, and - # retains only the MTT within-task residual  covariance.
+
+winsorized_reversed <- winsorized %>%
+  mutate(across(c(SimpleChoiceLatency, ComplexChoiceLatency,
+                  IES_MTTICMD, IES_MTTMTCMD,
+                  IES_congruencyCost, IES_mixCost),
+                ~ . * -1))
+
+cfa_fiml_alternative <- '
+Verbal_three =~ VRMDRTC + VRMFRDS + VRMIRTC
+CognitiveCost_three =~ IES_MTTICMD + IES_MTTMTCMD + IES_mixCost + IES_congruencyCost
+ProcSpeed_three =~ b1*SimpleChoiceLatency + b1*ComplexChoiceLatency
+
+# Latent factor correlations
+Verbal_three ~~ CognitiveCost_three
+Verbal_three ~~ ProcSpeed_three
+CognitiveCost_three ~~ ProcSpeed_three
+
+# Within-task residual covariance for MTT only
+IES_MTTICMD ~~ IES_MTTMTCMD
+'
+
+fit_fiml_alternative <- cfa(
+  cfa_fiml_alternative,
+  data = winsorized_reversed,
+  std.lv = TRUE,
+  missing = "fiml"
+)
+
+cat("\n====================================================\n")
+cat("Alternative FIML model explored during model checking\n")
+cat("Potential alternative solution; NOT used for factor extraction\n")
+cat("====================================================\n\n")
+
+summary(
+  fit_fiml_alternative,
+  fit.measures = TRUE,
+  standardized = TRUE,
+  ci = TRUE
+)
+```
+
+
+
 
 #------------------------------------------------------------------------------
 
 
 ```{r}
-## 1. Indicator variables: before vs after outlier removal
+### old version -->  Alternative FIML model without TSWT residual covariance (Heywood case)
+#What was in the previous version of the manuscript (sent July 2025)
 
-# 1a. Define the set of raw CFA indicators
-cfa_vars <- dat %>%
-  filter(record_id >= 2001) %>%
-  select(
-    VRMDRTC, VRMFRDS, VRMIRTC,
-    SimpleChoiceLatency, ComplexChoiceLatency,
-    IES_MTTICMD, IES_MTTMTCMD,
-    IES_congruencyCost, IES_mixCost
-  )
+cfa_heywood <- '
+Verbal_three =~ VRMDRTC + VRMFRDS + VRMIRTC
+CognitiveCost_three =~ IES_MTTICMD + IES_MTTMTCMD + IES_mixCost + IES_congruencyCost
+ProcSpeed_three =~ b1*SimpleChoiceLatency + b1*ComplexChoiceLatency
 
-# 1b. Compute counts
-n_before <- nrow(cfa_vars)
-n_missing_indicators <- sum(!complete.cases(cfa_vars))
-n_after_outlier_removal <- nrow(cleaned_data)
+# Correlations
+Verbal_three ~~ CognitiveCost_three
+Verbal_three ~~ ProcSpeed_three
+CognitiveCost_three ~~ ProcSpeed_three
 
-cat("Indicator sample size before outlier removal: ", n_before, "\n")
-cat("  – Missing on ≥1 indicator: ", n_missing_indicators, "\n")
-cat("Indicator sample size after outlier removal: ", n_after_outlier_removal, "\n\n")
+IES_MTTICMD ~~ IES_MTTMTCMD
+'
+
+fit_heywood <- cfa(
+  cfa_heywood,
+  data = cleaned_data,
+  std.lv = TRUE,
+  missing = "fiml"
+)
+
+cat("\n====================================================\n")
+cat("Comparison model 2: Alternative FIML model without TSWT residual covariance (Heywood case)\n")
+cat("NOT used for factor extraction\n")
+cat("====================================================\n\n")
+
+summary(
+  fit_heywood,
+  fit.measures = TRUE,
+  standardized = TRUE,
+  ci = TRUE
+)
+```
 
 
-## 2. New latent variables: how many non‐missing scores per factor
+```{r}
+# Question 1: raw correlations between the EF measures
 
-# new_dataframe must already contain record_id + factor_scores
+ef_corr <- cleaned_data %>%
+  select(IES_MTTICMD, IES_MTTMTCMD, IES_congruencyCost, IES_mixCost) %>%
+  cor(use = "pairwise.complete.obs")
+
+round(ef_corr, 3)
+```
+
+```{r}
+# Clean long-format table for Word
+
+library(tidyr)
 library(dplyr)
+library(psych)
 
-latent_counts <- new_dataframe %>%
-  summarize(
-    N_Verbal   = sum(!is.na(Verbal_three)),
-    N_CogCost  = sum(!is.na(CognitiveCost_three)),
-    N_Speed    = sum(!is.na(ProcSpeed_three))
+ef_data <- cleaned_data %>%
+  select(IES_MTTICMD, IES_MTTMTCMD, IES_congruencyCost, IES_mixCost)
+
+ef_corr_test <- psych::corr.test(ef_data, use = "pairwise")
+
+corr_table <- as.data.frame(ef_corr_test$r) %>%
+  tibble::rownames_to_column("Measure_1") %>%
+  pivot_longer(-Measure_1, names_to = "Measure_2", values_to = "r") %>%
+  mutate(
+    p = as.data.frame(ef_corr_test$p) %>%
+      tibble::rownames_to_column("Measure_1") %>%
+      pivot_longer(-Measure_1, names_to = "Measure_2", values_to = "p") %>%
+      pull(p)
+  ) %>%
+  filter(Measure_1 != Measure_2)
+
+corr_table %>%
+  mutate(
+    r = round(r, 3),
+    p = round(p, 3)
   )
-
-print(latent_counts)
-
 ```
 

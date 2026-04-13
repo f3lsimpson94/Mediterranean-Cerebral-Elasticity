@@ -1,0 +1,433 @@
+---
+title: "Final sample diagram for manuscript"
+author: "Felicity Simpson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8
+)
+```
+
+# 1. Purpose
+
+# 1.1 Overview
+
+This script produces a manuscript-ready sample flow diagram for the
+Mediterranean diet and cerebral arterial elasticity paper (PReFx paper).
+The diagram shows how the Newcastle analytic cohort (n = 198) fed into
+three separate analytic samples:
+
+- primary regression sample (listwise deletion, n = 159)
+- CFA sample (partial Mahalanobis outlier screening, n = 195 retained;
+  n = 190 used by lavaan)
+- mediation model (FIML, n = 198)
+
+# 1.2 Key analytic notes
+
+- Newcastle analytic cohort is defined as record_id >= 2001.
+- Primary regression exclusions reflect listwise deletion across
+  MedDiet, PReFx, age, sex, education, MVPA, and energy intake.
+- CFA outlier screening proceeds in two stages: (1) univariate outlier
+  cells (|z| > 3) are replaced with NA while participants are retained;
+  (2) multivariate outliers are identified via a partial Mahalanobis
+  procedure that accommodates partially missing rows (minimum 3
+  observed indicators, chi-square cutoff at p = .003).
+- Three participants were excluded as multivariate outliers. Five
+  participants retained in the CFA sample had no observed data on any
+  cognitive indicator and were ignored automatically by lavaan.
+- The mediation models were fitted on the full Newcastle cohort using
+  FIML; no listwise deletion was applied.
+
+---
+
+# 2. Packages
+
+```{r packages}
+library(tidyverse)
+library(DiagrammeR)
+library(knitr)
+```
+
+---
+
+# 3. File paths
+
+Update these paths if needed.
+
+```{r file-paths}
+path_primary <- "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor_c.csv"
+path_cfa     <- "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_2_updated.csv"
+path_mediate <- "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor_c.csv"
+```
+
+---
+
+# 4. Variables used in each analysis
+
+```{r variable-lists}
+primary_vars <- c(
+  "record_id", "age", "sex", "anu2_total_yrs_edu", "totalmvpa", "kJwithDF",
+  "MedDiet.Panagiotakis", "prefx_pfc_avg"
+)
+
+cfa_vars <- c(
+  "record_id",
+  "VRMDRTC.x", "VRMFRDS.x", "VRMIRTC.x",
+  "SimpleChoiceLatency.x", "ComplexChoiceLatency.x",
+  "IES_MTTICMD.x", "IES_MTTMTCMD.x",
+  "IES_congruencyCost.x", "IES_mixCost.x"
+)
+
+mediate_vars <- c(
+  "record_id", "MedDiet.Panagiotakis", "age", "sex", "anu2_total_yrs_edu",
+  "totalmvpa", "kJwithDF", "prefx_pfc_avg",
+  "Verbal_three", "CognitiveCost_three", "ProcSpeed_three"
+)
+```
+
+---
+
+# 5. Helper functions
+
+```{r helpers}
+# 5.1 Partial Mahalanobis outlier screening function.
+# Accommodates partially missing rows by computing Mahalanobis distances
+# using only the observed indicators for each participant.
+# Participants with fewer than min_vars observed indicators are skipped (NA returned).
+# A row-specific chi-square cutoff is applied based on the number of
+# observed indicators for that participant.
+mahalanobis_partial <- function(df, id_col = "record_id", p_cut = 0.997, min_vars = 3) {
+  X <- df[, setdiff(names(df), id_col), drop = FALSE]
+  n <- nrow(X)
+
+  md       <- rep(NA_real_, n)
+  df_used  <- rep(NA_integer_, n)
+  cutoff   <- rep(NA_real_, n)
+  ref_n    <- rep(NA_integer_, n)
+  outlier  <- rep(NA, n)
+
+  patterns        <- apply(!is.na(X), 1, function(z) paste(z, collapse = "|"))
+  unique_patterns <- unique(patterns)
+
+  for (pat in unique_patterns) {
+    idx     <- which(patterns == pat)
+    present <- which(strsplit(pat, "\\|", fixed = FALSE)[[1]] == "TRUE")
+
+    if (length(present) < min_vars) next
+
+    X_sub   <- X[, present, drop = FALSE]
+    ref_idx <- complete.cases(X_sub)
+    X_ref   <- X_sub[ref_idx, , drop = FALSE]
+
+    if (nrow(X_ref) <= length(present)) next
+
+    mu      <- colMeans(X_ref)
+    S       <- stats::cov(X_ref)
+
+    bad_cov <- any(is.na(S)) || isTRUE(det(S) == 0)
+    if (bad_cov) next
+
+    md_vals  <- mahalanobis(X[idx, present, drop = FALSE], center = mu, cov = S)
+    cutoff_i <- qchisq(p_cut, df = length(present))
+
+    md[idx]      <- md_vals
+    df_used[idx] <- length(present)
+    cutoff[idx]  <- cutoff_i
+    ref_n[idx]   <- nrow(X_ref)
+    outlier[idx] <- md_vals > cutoff_i
+  }
+
+  tibble(
+    record_id            = df[[id_col]],
+    mahalanobis_d        = md,
+    df_used              = df_used,
+    cutoff               = cutoff,
+    ref_n                = ref_n,
+    multivariate_outlier = outlier
+  )
+}
+
+# 5.2 Formatting helper for node labels.
+fmt_n <- function(x) format(x, big.mark = ",", scientific = FALSE)
+```
+
+---
+
+# 6. Load data
+
+```{r load-data}
+dat_primary_raw <- read.csv(path_primary)
+dat_cfa_raw     <- read.csv(path_cfa)
+dat_med_raw     <- read.csv(path_mediate)
+```
+
+---
+
+# 7. Derive sample counts
+
+## 7.1 Primary regression branch
+
+```{r primary-branch}
+primary_newcastle <- dat_primary_raw %>%
+  filter(record_id >= 2001) %>%
+  dplyr::select(all_of(primary_vars))
+
+n_primary_newcastle <- nrow(primary_newcastle)
+n_primary_complete  <- sum(complete.cases(primary_newcastle))
+n_primary_excluded  <- n_primary_newcastle - n_primary_complete
+
+primary_missing_breakdown <- tibble(
+  variable  = names(primary_newcastle),
+  n_missing = sapply(primary_newcastle, function(x) sum(is.na(x)))
+)
+
+kable(
+  primary_missing_breakdown,
+  caption = "Missingness for variables used in the primary regression models"
+)
+```
+
+## 7.2 CFA branch
+
+```{r cfa-branch}
+semvars <- dat_cfa_raw %>%
+  filter(record_id >= 2001) %>%
+  dplyr::select(all_of(cfa_vars))
+
+n_cfa_newcastle <- nrow(semvars)
+
+# 7.2.1 Z-standardise indicators.
+analysis_data        <- semvars
+analysis_data[-1]    <- lapply(analysis_data[-1], function(x) as.numeric(scale(x)))
+
+# 7.2.2 Univariate outlier screening: flag cells with |z| > 3.
+uni_flag_matrix                     <- sapply(analysis_data[-1], function(x) abs(x) > 3)
+analysis_data$any_univariate_outlier <- apply(uni_flag_matrix, 1, function(x) any(x, na.rm = TRUE))
+
+n_participants_with_uni <- sum(analysis_data$any_univariate_outlier, na.rm = TRUE)
+n_uni_cells             <- sum(uni_flag_matrix, na.rm = TRUE)
+
+# 7.2.3 Replace univariate outlier cells with NA; participants are retained.
+analysis_data_na_uni <- analysis_data
+indicator_names      <- setdiff(names(analysis_data_na_uni), c("record_id", "any_univariate_outlier"))
+
+for (v in indicator_names) {
+  analysis_data_na_uni[[v]][abs(analysis_data_na_uni[[v]]) > 3] <- NA
+}
+
+# 7.2.4 Partial Mahalanobis multivariate outlier screening.
+md_input   <- analysis_data_na_uni[, setdiff(names(analysis_data_na_uni), "any_univariate_outlier"), drop = FALSE]
+md_results <- mahalanobis_partial(df = md_input, id_col = "record_id", p_cut = 0.997, min_vars = 3)
+
+outlier_ids         <- md_results$record_id[which(md_results$multivariate_outlier %in% TRUE)]
+n_md_computed       <- sum(!is.na(md_results$mahalanobis_d))
+n_multivar_outliers <- length(outlier_ids)
+
+# 7.2.5 Remove multivariate outliers.
+analysis_data_cleanflags <- merge(
+  analysis_data_na_uni,
+  md_results[, c("record_id", "multivariate_outlier")],
+  by      = "record_id",
+  all.x   = TRUE,
+  sort    = FALSE
+)
+
+analysis_data_cleanflags$multivariate_outlier[
+  is.na(analysis_data_cleanflags$multivariate_outlier)
+] <- FALSE
+
+analysis_data_clean <- analysis_data_cleanflags[
+  !analysis_data_cleanflags$multivariate_outlier,
+]
+
+n_cfa_retained <- nrow(analysis_data_clean)
+
+# 7.2.6 Identify rows that are empty on all indicators and will be ignored by lavaan.
+clean_indicator_names     <- setdiff(
+  names(analysis_data_clean),
+  c("record_id", "any_univariate_outlier", "multivariate_outlier")
+)
+all_missing_rows          <- apply(is.na(analysis_data_clean[clean_indicator_names]), 1, all)
+n_all_missing_after_retention <- sum(all_missing_rows)
+n_cfa_used_by_lavaan      <- n_cfa_retained - n_all_missing_after_retention
+```
+
+```{r cfa-branch-summary}
+cfa_summary <- tibble(
+  step = c(
+    "Newcastle analytic cohort for CFA",
+    "Participants with at least one univariate outlier cell",
+    "Univariate outlier cells replaced with NA",
+    "Rows with Mahalanobis distance computed",
+    "Multivariate outliers removed",
+    "Retained after multivariate outlier removal",
+    "Rows empty on all indicators (ignored by lavaan)",
+    "Observations used by lavaan"
+  ),
+  n = c(
+    n_cfa_newcastle,
+    n_participants_with_uni,
+    n_uni_cells,
+    n_md_computed,
+    n_multivar_outliers,
+    n_cfa_retained,
+    n_all_missing_after_retention,
+    n_cfa_used_by_lavaan
+  )
+)
+
+kable(cfa_summary, caption = "CFA sample derivation summary")
+
+if (length(outlier_ids) > 0) {
+  cat("Flagged multivariate outlier record IDs:", paste(outlier_ids, collapse = ", "), "\n")
+}
+```
+
+## 7.3 Mediation branch
+
+```{r mediation-branch}
+med_newcastle <- dat_med_raw %>%
+  filter(record_id >= 2001) %>%
+  dplyr::select(all_of(mediate_vars))
+
+n_med_newcastle <- nrow(med_newcastle)
+
+med_missing_breakdown <- tibble(
+  variable  = names(med_newcastle),
+  n_missing = sapply(med_newcastle, function(x) sum(is.na(x)))
+)
+
+kable(
+  med_missing_breakdown,
+  caption = "Missingness for variables entering mediation models fitted with FIML"
+)
+```
+
+---
+
+# 8. Key counts summary
+
+```{r key-counts}
+key_counts <- tibble(
+  measure = c(
+    "Newcastle analytic cohort",
+    "Primary regression sample (listwise deletion)",
+    "Excluded from primary regression (missing data)",
+    "CFA: retained after outlier screening",
+    "CFA: excluded as multivariate outliers",
+    "CFA: rows empty on all indicators (ignored by lavaan)",
+    "CFA: observations used by lavaan",
+    "Mediation model (FIML)"
+  ),
+  n = c(
+    n_primary_newcastle,
+    n_primary_complete,
+    n_primary_excluded,
+    n_cfa_retained,
+    n_multivar_outliers,
+    n_all_missing_after_retention,
+    n_cfa_used_by_lavaan,
+    n_med_newcastle
+  )
+)
+
+kable(key_counts, caption = "Key sample counts for the manuscript flow diagram")
+```
+
+---
+
+# 9. Manuscript flow diagram
+
+Two versions are provided below. Version A orders branches from most to
+least restrictive (Primary | CFA | Mediation). Version B reverses this
+order (Mediation | CFA | Primary). Run both and select the layout that
+reads most clearly in your target journal format.
+
+Exclusion boxes use dashed borders to follow CONSORT/STROBE convention:
+inclusions flow straight down the main spine; exclusions branch
+sideways.
+
+
+The following caption can be adapted for the manuscript. It carries the
+methodological detail that has been kept out of the diagram boxes.
+
+**Figure 1.** *Flow diagram for the final analytic samples.*
+The Newcastle analytic cohort comprised 198 participants (record_id
+>= 2001). For the primary regression analyses, the analytic sample was
+derived by listwise deletion across Mediterranean diet score, PReFx,
+age, sex, years of education, MVPA, and total energy intake, yielding
+n = 159 complete cases. For the confirmatory factor analysis (CFA),
+cognitive indicators were first screened for univariate outliers
+cell-wise (|z| > 3; 16 cells replaced with NA across 14 participants),
+followed by multivariate outlier screening using a partial Mahalanobis
+procedure that accommodated partially observed rows (minimum 3 observed
+indicators; chi-square cutoff at p = .003). Three participants were
+excluded as multivariate outliers, leaving n = 195 retained. Of these,
+five had no observed data on any cognitive indicator and were ignored
+automatically by lavaan, yielding n = 190 observations used for model
+estimation. The mediation models were estimated on the full Newcastle
+cohort (n = 198) using Full Information Maximum Likelihood (FIML),
+with no listwise deletion applied.
+
+
+
+```{r diagram-version-A, results='asis'}
+
+label_newcastle    <- paste0("Newcastle analytic cohort\nn = ", fmt_n(n_primary_newcastle))
+
+label_primary      <- paste0("Primary analysis\n(listwise deletion)\nn = ", fmt_n(n_primary_complete))
+label_primary_excl <- paste0("Excluded: missing data\nn = ", fmt_n(n_primary_excluded))
+
+label_cfa_retained <- paste0("Retained after outlier screening\nn = ", fmt_n(n_cfa_retained))
+label_cfa_excl     <- paste0("Excluded as multivariate outliers\nn = ", fmt_n(n_multivar_outliers))
+label_cfa_lavaan   <- paste0("CFA: observations used by lavaan\nn = ", fmt_n(n_cfa_used_by_lavaan))
+label_cfa_empty    <- paste0("Empty on all cognitive indicators\nn = ", fmt_n(n_all_missing_after_retention))
+label_mediation    <- paste0("Mediation model fitted with FIML\nn = ", fmt_n(n_med_newcastle))
+
+DiagrammeR::grViz(glue::glue("
+  digraph sample_flow_A {{
+    graph [layout = dot, rankdir = TB, nodesep = 1.5, ranksep = 0.9]
+    node [shape = box, style = rounded, fontname = Helvetica, fontsize = 11, margin = 0.25, width = 2.8]
+    edge [fontname = Helvetica, fontsize = 10]
+
+    A  [label = '{label_newcastle}']
+
+    B1 [label = '{label_primary}']
+    B2 [label = '{label_primary_excl}', style = 'rounded,dashed']
+
+    C1 [label = '{label_cfa_retained}']
+    C2 [label = '{label_cfa_excl}',  style = 'rounded,dashed']
+    C3 [label = '{label_cfa_lavaan}']
+    C4 [label = '{label_cfa_empty}', style = 'rounded,dashed']
+    C5 [label = '{label_mediation}']
+
+    A  -> B1
+    A  -> C1
+
+    B1 -> B2 [style = dashed]
+
+    C1 -> C2 [style = dashed]
+    C1 -> C3
+    C3 -> C4 [style = dashed]
+    C3 -> C5
+
+    {{rank = same; B1; C1}}
+    {{rank = same; B2; C2}}
+  }}
+"))
+```
+
+
+
+

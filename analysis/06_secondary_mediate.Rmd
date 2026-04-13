@@ -31,7 +31,7 @@ set.seed(20250903)
 
 ```{r}
 # 2) Load & prepare data -----------------------------------------------------
-dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor.csv") %>%
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor_c.csv") %>%
   dplyr::filter(record_id >= 2001) %>%
   dplyr::mutate(sex = ifelse(sex == "Male", 1, 0)) %>%  # 0 = female, 1 = male
   dplyr::select(-record_id)

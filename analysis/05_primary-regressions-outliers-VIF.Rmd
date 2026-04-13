@@ -120,6 +120,15 @@ main = "Association between MedDiet and PReFx (Model 3)"
 )
 
 ```
+```{r}
+visreg(
+  model3, "MedDiet.Panagiotakis",
+  xlab = "Mediterranean Diet Score",
+  ylab = "PReFx",
+  main = "Association between MedDiet and PReFx (Model 3)",
+  points.par = list(cex = 0.75, pch = 16)
+)
+```
 
 ```{r}
 # ---- 7) Diagnostics for Model 3 ----

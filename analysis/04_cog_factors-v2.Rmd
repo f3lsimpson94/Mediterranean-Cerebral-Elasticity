@@ -1,0 +1,516 @@
+---
+title: "Corrected 3-Factor CFA Pipeline"
+author: "Felicity Simpson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+## Purpose
+
+This document implements a 3-factor CFA pipeline for 9  cognitive indicators.
+
+## Key analytic notes
+
+- Univariate outliers are handled cell-wise. Values with absolute z-scores greater than 3 are replaced with `NA`, while participants are retained.
+- Multivariate outliers are screened using a partial Mahalanobis approach that tolerates partially missing rows.
+- The Mahalanobis cutoff is row-specific and depends on the number of observed indicators available for that participant.
+- Remaining missing data are handled in the CFA using FIML.
+- RT and cost variables are reverse-scored before the final CFA so that higher values reflect better performance.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+options(stringsAsFactors = FALSE)
+
+library(lavaan)
+```
+
+# Helper functions
+
+## Descriptive statistics helper
+
+```{r helper-descriptives}
+describe_simple <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) {
+    return(data.frame(
+      n = 0,
+      mean = NA_real_,
+      sd = NA_real_,
+      median = NA_real_,
+      min = NA_real_,
+      max = NA_real_
+    ))
+  }
+  data.frame(
+    n = length(x),
+    mean = mean(x),
+    sd = sd(x),
+    median = median(x),
+    min = min(x),
+    max = max(x)
+  )
+}
+
+column_descriptives <- function(df) {
+  out <- lapply(df, describe_simple)
+  out <- do.call(rbind, out)
+  out <- cbind(variable = names(df), out)
+  rownames(out) <- NULL
+  out
+}
+```
+
+# Load data
+
+## Read source file
+
+```{r load-data}
+dat <- read.csv("C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_2_updated.csv")
+```
+
+## Select analytic sample and indicators
+
+```{r select-analytic-sample}
+keep_vars <- c(
+  "record_id",
+  "VRMDRTC.x", "VRMFRDS.x", "VRMIRTC.x",
+  "SimpleChoiceLatency.x", "ComplexChoiceLatency.x",
+  "IES_MTTICMD.x", "IES_MTTMTCMD.x",
+  "IES_congruencyCost.x", "IES_mixCost.x"
+)
+
+semvars <- dat[dat$record_id >= 2001, keep_vars]
+
+cat("\n==================== RAW DATA SUMMARY ====================\n")
+print(summary(semvars))
+```
+
+# Missing data and preprocessing
+
+## Missing data summary
+
+```{r missing-data-summary}
+missing_summary <- data.frame(
+  variable = names(semvars)[-1],
+  n_missing = sapply(semvars[-1], function(x) sum(is.na(x))),
+  pct_missing = round(100 * sapply(semvars[-1], function(x) sum(is.na(x))) / nrow(semvars), 2)
+)
+
+cat("\n==================== MISSING DATA SUMMARY ====================\n")
+print(missing_summary)
+```
+
+## Z-standardize indicators
+
+```{r z-standardise}
+analysis_data <- semvars
+analysis_data[-1] <- lapply(analysis_data[-1], function(x) as.numeric(scale(x)))
+
+cat("\n==================== DESCRIPTIVES (STANDARDIZED DATA) ====================\n")
+print(column_descriptives(analysis_data[-1]))
+```
+
+## Correlation matrix before outlier handling
+
+```{r correlations-before}
+cor_mat_before <- cor(analysis_data[-1], use = "pairwise.complete.obs")
+
+cat("\n==================== CORRELATION MATRIX BEFORE REMOVAL ====================\n")
+print(round(cor_mat_before, 2))
+```
+
+## Histograms before outlier handling
+
+```{r histograms-before, fig.width=10, fig.height=8}
+op <- par(no.readonly = TRUE)
+par(mfrow = c(3, 3), mar = c(3, 3, 2, 1))
+
+for (v in names(analysis_data)[-1]) {
+  hist(
+    analysis_data[[v]],
+    main = v,
+    xlab = "Standardized score",
+    col = "grey80",
+    border = "white"
+  )
+}
+
+par(op)
+```
+
+# Univariate outlier screening
+
+## Flag univariate outliers
+
+```{r univariate-flags}
+uni_flag_matrix <- sapply(analysis_data[-1], function(x) abs(x) > 3)
+uni_flag_matrix <- as.data.frame(uni_flag_matrix)
+
+uni_summary <- data.frame(
+  variable = names(analysis_data)[-1],
+  n_univariate_outliers = sapply(analysis_data[-1], function(x) sum(abs(x) > 3, na.rm = TRUE)),
+  pct_univariate_outliers = round(
+    100 * sapply(analysis_data[-1], function(x) sum(abs(x) > 3, na.rm = TRUE)) / nrow(analysis_data),
+    2
+  )
+)
+
+cat("\n==================== UNIVARIATE OUTLIER SUMMARY (|z| > 3) ====================\n")
+print(uni_summary)
+```
+
+## Participant-level univariate flag
+
+```{r participant-univariate-flag}
+analysis_data$any_univariate_outlier <- apply(uni_flag_matrix, 1, function(x) any(x, na.rm = TRUE))
+
+cat(
+  "\nParticipants with at least one univariate outlier: ",
+  sum(analysis_data$any_univariate_outlier, na.rm = TRUE),
+  " out of ", nrow(analysis_data), "\n",
+  sep = ""
+)
+```
+
+## Replace univariate outlier cells with `NA`
+
+```{r replace-univariate-outliers}
+analysis_data_na_uni <- analysis_data
+
+indicator_names <- setdiff(names(analysis_data_na_uni), c("record_id", "any_univariate_outlier"))
+
+for (v in indicator_names) {
+  analysis_data_na_uni[[v]][abs(analysis_data_na_uni[[v]]) > 3] <- NA
+}
+
+n_cells_replaced <- sum(
+  sapply(analysis_data[indicator_names], function(x) sum(abs(x) > 3, na.rm = TRUE))
+)
+
+cat("\nTotal univariate outlier cells replaced with NA: ", n_cells_replaced, "\n", sep = "")
+```
+
+## Missingness after univariate replacement
+
+```{r missingness-after-univariate}
+missing_after_uni <- data.frame(
+  variable = indicator_names,
+  n_missing_after_uni_replacement = sapply(analysis_data_na_uni[indicator_names], function(x) sum(is.na(x))),
+  pct_missing_after_uni_replacement = round(
+    100 * sapply(analysis_data_na_uni[indicator_names], function(x) sum(is.na(x))) / nrow(analysis_data_na_uni),
+    2
+  )
+)
+
+cat("\n==================== MISSINGNESS AFTER UNIVARIATE REPLACEMENT ====================\n")
+print(missing_after_uni)
+```
+
+# Multivariate outlier screening
+
+## Partial Mahalanobis function
+
+```{r mahalanobis-function}
+mahalanobis_partial <- function(df, id_col = "record_id", p_cut = 0.997, min_vars = 3) {
+
+  X <- df[, setdiff(names(df), id_col), drop = FALSE]
+  n <- nrow(X)
+
+  md <- rep(NA_real_, n)
+  df_used <- rep(NA_integer_, n)
+  cutoff <- rep(NA_real_, n)
+  ref_n <- rep(NA_integer_, n)
+  outlier <- rep(NA, n)
+
+  patterns <- apply(!is.na(X), 1, function(z) paste(z, collapse = "|"))
+  unique_patterns <- unique(patterns)
+
+  for (pat in unique_patterns) {
+    idx <- which(patterns == pat)
+    present <- which(strsplit(pat, "\\|")[[1]] == "TRUE")
+
+    if (length(present) < min_vars) next
+
+    X_sub <- X[, present, drop = FALSE]
+    ref_idx <- complete.cases(X_sub)
+    X_ref <- X_sub[ref_idx, , drop = FALSE]
+
+    if (nrow(X_ref) <= length(present)) next
+
+    S <- cov(X_ref)
+
+    if (!is.matrix(S) || any(!is.finite(S)) || det(S) <= .Machine$double.eps) next
+
+    mu <- colMeans(X_ref)
+    md_vals <- mahalanobis(
+      x = as.matrix(X_sub[idx, , drop = FALSE]),
+      center = mu,
+      cov = S
+    )
+
+    df_i <- length(present)
+    cutoff_i <- qchisq(p_cut, df = df_i)
+
+    md[idx] <- md_vals
+    df_used[idx] <- df_i
+    cutoff[idx] <- cutoff_i
+    ref_n[idx] <- nrow(X_ref)
+    outlier[idx] <- md_vals > cutoff_i
+  }
+
+  data.frame(
+    record_id = df[[id_col]],
+    mahalanobis_d = md,
+    mahalanobis_df = df_used,
+    mahalanobis_cutoff = cutoff,
+    mahalanobis_ref_n = ref_n,
+    multivariate_outlier = outlier
+  )
+}
+```
+
+## Apply partial Mahalanobis screening
+
+```{r apply-mahalanobis}
+md_input <- analysis_data_na_uni[, setdiff(names(analysis_data_na_uni), "any_univariate_outlier"), drop = FALSE]
+
+md_results <- mahalanobis_partial(
+  df = md_input,
+  id_col = "record_id",
+  p_cut = 0.997,
+  min_vars = 3
+)
+
+cat("\n==================== MAHALANOBIS RESULTS ====================\n")
+print(md_results)
+
+cat("\n==================== MULTIVARIATE OUTLIER COUNTS ====================\n")
+print(table(md_results$multivariate_outlier, useNA = "ifany"))
+```
+
+## Note on the bug fix
+
+The corrected function uses a `|` separator when storing missingness patterns and splits on that same separator when identifying observed variables. This avoids the earlier pattern-matching bug where concatenated `TRUE`/`FALSE` values were split character by character rather than token by token.
+
+## Flagged multivariate outliers
+
+```{r flagged-outlier-ids}
+outlier_ids <- md_results$record_id[which(md_results$multivariate_outlier %in% TRUE)]
+
+cat("\nFlagged multivariate outlier IDs:\n")
+print(outlier_ids)
+
+cat("\nN with Mahalanobis distance computed:", sum(!is.na(md_results$mahalanobis_d)), "\n")
+```
+
+# Remove multivariate outliers
+
+## Merge flags and remove flagged participants
+
+```{r remove-multivariate-outliers}
+analysis_data_cleanflags <- merge(
+  analysis_data_na_uni,
+  md_results[, c("record_id", "multivariate_outlier")],
+  by = "record_id",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+analysis_data_cleanflags$multivariate_outlier[is.na(analysis_data_cleanflags$multivariate_outlier)] <- FALSE
+analysis_data_clean <- analysis_data_cleanflags[!analysis_data_cleanflags$multivariate_outlier, ]
+
+cat("\n==================== SAMPLE SIZE AFTER REMOVAL ====================\n")
+cat("Original N:", nrow(analysis_data_cleanflags), "\n")
+cat("Removed multivariate outliers:", length(outlier_ids), "\n")
+cat("Retained N:", nrow(analysis_data_clean), "\n")
+```
+
+## Descriptives after multivariate outlier removal
+
+```{r descriptives-after-removal}
+clean_indicator_names <- setdiff(
+  names(analysis_data_clean),
+  c("record_id", "any_univariate_outlier", "multivariate_outlier")
+)
+
+cat("\n==================== DESCRIPTIVES AFTER REMOVAL ====================\n")
+print(column_descriptives(analysis_data_clean[clean_indicator_names]))
+```
+
+## Correlation matrix after multivariate outlier removal
+
+```{r correlations-after-removal}
+cor_mat_after <- cor(analysis_data_clean[clean_indicator_names], use = "pairwise.complete.obs")
+
+cat("\n==================== CORRELATION MATRIX AFTER REMOVAL ====================\n")
+print(round(cor_mat_after, 2))
+```
+
+## Histograms after multivariate outlier removal
+
+```{r histograms-after, fig.width=10, fig.height=8}
+op <- par(no.readonly = TRUE)
+par(mfrow = c(3, 3), mar = c(3, 3, 2, 1))
+
+for (v in clean_indicator_names) {
+  hist(
+    analysis_data_clean[[v]],
+    main = v,
+    xlab = "Standardized score",
+    col = "grey80",
+    border = "white"
+  )
+}
+
+par(op)
+```
+
+# Reverse-score indicators for the final CFA
+
+## Higher scores indicate better performance
+
+```{r reverse-score}
+reverse_vars <- c(
+  "SimpleChoiceLatency.x", "ComplexChoiceLatency.x",
+  "IES_MTTICMD.x", "IES_MTTMTCMD.x",
+  "IES_congruencyCost.x", "IES_mixCost.x"
+)
+
+analysis_data_clean[reverse_vars] <- lapply(analysis_data_clean[reverse_vars], function(x) x * -1)
+```
+
+# Confirm final analytic sample used for CFA
+
+## Participants retained versus used by lavaan
+
+```{r final-sample-check}
+all_missing_rows <- apply(is.na(analysis_data_clean[clean_indicator_names]), 1, all)
+
+cat("\nRetained after multivariate outlier removal:", nrow(analysis_data_clean), "\n")
+cat("Rows empty on all indicators and therefore ignored by lavaan:", sum(all_missing_rows), "\n")
+cat("Expected number used by lavaan:", nrow(analysis_data_clean) - sum(all_missing_rows), "\n")
+```
+
+# CFA model
+
+## Model specification
+
+```{r model-specification}
+cfa3_model <- '
+  Verbal_three =~ VRMDRTC.x + VRMFRDS.x + VRMIRTC.x
+
+  CognitiveCost_three =~
+    IES_MTTICMD.x +
+    IES_MTTMTCMD.x +
+    IES_mixCost.x +
+    IES_congruencyCost.x
+
+  ProcSpeed_three =~
+    b1*SimpleChoiceLatency.x + b1*ComplexChoiceLatency.x
+
+  Verbal_three ~~ CognitiveCost_three
+  Verbal_three ~~ ProcSpeed_three
+  CognitiveCost_three ~~ ProcSpeed_three
+
+  IES_MTTICMD.x ~~ IES_MTTMTCMD.x
+  IES_mixCost.x ~~ IES_congruencyCost.x
+'
+```
+
+## Fit CFA model with FIML
+
+```{r fit-cfa}
+cfa_input <- analysis_data_clean[clean_indicator_names]
+
+cfa3_fit <- cfa(
+  model = cfa3_model,
+  data = cfa_input,
+  std.lv = TRUE,
+  missing = "fiml"
+)
+
+cat("\n==================== CFA SUMMARY ====================\n")
+summary(cfa3_fit, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+```
+
+## Fit indices
+
+```{r fit-indices}
+fit_indices <- fitMeasures(
+  cfa3_fit,
+  c("chisq", "df", "pvalue", "rmsea", "srmr", "cfi", "tli", "aic", "bic", "pnfi")
+)
+
+print(round(fit_indices, 3))
+```
+
+## Standardized factor loadings
+
+```{r standardized-loadings}
+std_solution <- standardizedSolution(cfa3_fit)
+loadings_table <- std_solution[std_solution$op == "=~", c("lhs", "rhs", "est.std", "pvalue")]
+print(loadings_table)
+```
+
+## Modification indices above 3.84
+
+```{r modification-indices}
+mod_indices <- modificationIndices(cfa3_fit)
+mod_indices_high <- mod_indices[mod_indices$mi > 3.84, ]
+print(mod_indices_high)
+```
+
+
+
+# Factor scores and merged dataset
+
+## Extract factor scores
+
+```{r factor-scores}
+factor_scores <- lavPredict(cfa3_fit, type = "lv")
+factor_scores_df <- data.frame(record_id = analysis_data_clean$record_id, factor_scores)
+
+cat("\n==================== FACTOR SCORE STRUCTURE ====================\n")
+str(factor_scores_df)
+```
+
+## Merge factor scores back to the original dataset
+
+```{r merge-factor-scores}
+final_dataset <- merge(dat, factor_scores_df, by = "record_id", all.x = TRUE, sort = FALSE)
+
+cat("\n==================== MERGED DATASET SUMMARY ====================\n")
+cat("Rows in original data:", nrow(dat), "\n")
+cat("Rows in merged data:", nrow(final_dataset), "\n")
+cat("\nNew latent score variables added:\n")
+print(names(factor_scores_df)[-1])
+```
+
+## Optional save step
+
+```{r save-output, eval=FALSE}
+write.csv(
+  final_dataset,
+  "C:/Users/c3371138/Dropbox/optical-imaging/AF_optical_3factor_c.csv",
+  row.names = FALSE
+)
+```
+
+# Notes for manuscript updating
+
+## Suggested reporting points
+
+- Multivariate outlier screening was updated to use a partial Mahalanobis procedure that screened participants with partially observed indicator sets rather than restricting screening to complete cases only.
+- Mahalanobis distances were computed for participants with at least 3 observed indicators.
+- Three multivariate outliers were removed after screening.
+- The final CFA was estimated with FIML on the retained sample, with completely empty rows ignored automatically by `lavaan`.
+- RT and cost variables were reverse-scored before model estimation so that higher scores reflected better performance.

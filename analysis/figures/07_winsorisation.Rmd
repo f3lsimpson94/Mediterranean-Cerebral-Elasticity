@@ -1,0 +1,214 @@
+---
+title: "Winsorization Comparison Figures"
+author: "Felicity Simpson"
+date: "2026-02-26"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+
+```
+
+```{r}
+# Load data
+path <- "C:/Users/c3371138/Dropbox/optical-imaging/dat/AF_optical_2.csv"
+dat <- read.csv(path, stringsAsFactors = FALSE)
+
+# Optional: if you want the analytic sample only (uncomment if needed)
+# dat <- dat %>% filter(record_id >= 2001)
+
+# Variables used in the winsorization figure
+cog_vars <- c(
+  "ComplexChoiceLatency",
+  "IES_congruencyCost",
+  "IES_mixCost",
+  "IES_MTTICMD",
+  "IES_MTTMTCMD",
+  "SimpleChoiceLatency",
+  "VRMDRTC",
+  "VRMFRDS",
+  "VRMIRTC"
+)
+
+# Fail fast if any are missing
+missing_vars <- setdiff(cog_vars, names(dat))
+if (length(missing_vars) > 0) {
+  stop(
+    paste0(
+      "These variables are missing from the dataset: ",
+      paste(missing_vars, collapse = ", ")
+    )
+  )
+}
+
+# Keep only the variables needed for plotting
+dat_plot <- dat %>% dplyr::select(all_of(cog_vars))
+```
+
+
+```{r}
+# Cleaner labels for facet titles
+var_labels <- c(
+  ComplexChoiceLatency = "Complex choice\nlatency",
+  SimpleChoiceLatency  = "Simple choice\nlatency",
+  IES_congruencyCost   = "TSWT congruency\ncost (IES)",
+  IES_mixCost          = "TSWT multitasking\ncost (IES)",
+  IES_MTTICMD          = "MTT incongruent\ncost (IES)",
+  IES_MTTMTCMD         = "MTT multitasking\ncost (IES)",
+  VRMDRTC              = "VRM delayed\nrecognition RT",
+  VRMFRDS              = "VRM free recall\n(delayed)",
+  VRMIRTC              = "VRM immediate\nrecognition RT"
+)
+```
+
+
+```{r}
+winsorize_sd <- function(x, z = 3.29) {
+  if (!is.numeric(x)) return(x)
+  if (all(is.na(x))) return(x)
+
+  mu <- mean(x, na.rm = TRUE)
+  s  <- sd(x, na.rm = TRUE)
+
+  if (is.na(s) || s == 0) return(x)
+
+  lower <- mu - z * s
+  upper <- mu + z * s
+
+  x_w <- x
+  x_w[x_w < lower] <- lower
+  x_w[x_w > upper] <- upper
+  x_w
+}
+
+dat_wins <- dat_plot %>%
+  mutate(across(everything(), winsorize_sd))
+```
+
+
+```{r}
+
+# Long-format data: before vs after winsorization --------------------------------
+long_before <- dat_plot %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(Type = "Before Winsorization")
+
+long_after <- dat_wins %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(Type = "After Winsorization")
+
+# Combine and format plotting variables -----------------------------------------
+plot_long <- dplyr::bind_rows(long_before, long_after) %>%
+  dplyr::mutate(
+    # Full labels for legend (ordered Before then After)
+    Type = factor(Type, levels = c("Before Winsorization", "After Winsorization")),
+
+    # Short labels for panel x-axis text
+    Type_short = factor(
+      Type,
+      levels = c("Before Winsorization", "After Winsorization"),
+      labels = c("Before", "After")
+    ),
+
+    # Add spaced x positions so the two boxplots are visually separated
+    x_pos = dplyr::case_when(
+      Type == "Before Winsorization" ~ 1,
+      Type == "After Winsorization"  ~ 3
+    ),
+
+    # Keep facet order stable
+    variable = factor(variable, levels = cog_vars),
+
+    # Cleaner facet labels
+    variable_clean = dplyr::recode(as.character(variable), !!!var_labels),
+    variable_clean = factor(variable_clean, levels = unname(var_labels[cog_vars]))
+  )
+
+# Boxplot figure ----------------------------------------------------------------
+p_box <- ggplot(plot_long, aes(x = x_pos, y = value, fill = Type, group = Type)) +
+  geom_boxplot(
+    outlier.size = 1.2,
+    alpha = 0.85,
+    width = 0.5,
+    na.rm = TRUE
+  ) +
+  facet_wrap(~ variable_clean, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Comparison of Distributions Before & After Winsorization",
+    x = "Winsorization Status",
+    y = "Value"
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Before", "After")
+  ) +
+  scale_fill_discrete(
+    name = "Type",
+    labels = c("Before Winsorization", "After Winsorization")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", size = 9, lineheight = 0.95),
+    axis.text.x = element_text(size = 9),
+    panel.spacing = grid::unit(0.8, "lines"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    plot.margin = margin(8, 8, 12, 8)
+  ) +
+  guides(fill = guide_legend(nrow = 1))
+
+p_box
+
+```
+
+```{r}
+
+p_hist <- ggplot(plot_long, aes(x = value, fill = Type)) +
+  geom_histogram(
+    position = "identity",
+    alpha = 0.6,
+    bins = 20,
+    na.rm = TRUE
+  ) +
+  facet_wrap(~ variable_clean, scales = "free", ncol = 3) +
+  labs(
+    x = "Value",
+    y = "Count"
+  ) +
+  scale_fill_discrete(
+    name = "Type",
+    labels = c("Before Winsorization", "After Winsorization")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", size = 9, lineheight = 0.95),
+    panel.spacing = grid::unit(0.8, "lines"),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(fill = guide_legend(ncol = 1))
+
+p_hist
+```
+
